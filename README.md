@@ -1,11 +1,11 @@
 #!/bin/ksh
 ##############################################################################
 #
-# Script:         mqstartchannels.sh
+# Script:         mqstopchannels.sh
 #
-# Usage:          mqstartchannels.sh <qmgr> <chltype> | <ALL filename>
+# Usage:          mqstopchannels.sh <qmgr> <chltype> | <ALL filename>
 #
-# Description:    start channels
+# Description:    select and stop channels
 #                     
 #
 # Remarks:         
@@ -17,8 +17,8 @@
 # History:         2013-03-02   lreckru     add channel list in file as parameter
 #                                           each line must be like "CHANNEL(name)"
 #                                           ever exclude SYSTEM.* Objects
-#				   2014-11-27	sanzmaj	    multiversion
-#								phutzel	    checks
+#                  2014-11-27   sanzmaj     multiversion
+#                               phutzel     checks
 #
 ##############################################################################
 #
@@ -46,10 +46,10 @@ fi
 
 qmgr=$1
 CHT=$2
-
 # Checks and set multi-version vars
 mqsetenv -m $qmgr
 
+# Check channel list
 if [ "${CHT}" = "ALL" ];then
    Obj_Listfile=$3
    extstr="from file $Obj_Listfile"
@@ -59,10 +59,10 @@ if [ "${CHT}" = "ALL" ];then
    fi
 fi
 
+platform=`uname`
+
 echo "Working with Queue Manager : ${qmgr} and channel type : $CHT $extstr" 
 echo "Excluding channels with 'SYSTEM.*' in the name "
-
-platform=`uname`
 
 if [ "${migrationDir}" = "" ]; then
 	if [ $platform = 'CYGWIN_NT-5.1' ]; then
@@ -80,71 +80,94 @@ if [ ! -d $migrationDir ];then
 fi
 
 # ensure we have a directory per queue manager
-if [ ! -d ${migrationDir}/${qmgr} ]; then
-   mkdir ${migrationDir}/${qmgr}
+if [ ! -d ${migrationDir}/${qmgr} ];then
+	mkdir ${migrationDir}/${qmgr}
 fi
 
-if [ -f ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt ]; then 
-   rm ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt 
+
+if [ -f ${migrationDir}/${qmgr}/"$CHT"_channel.txt ]; then 
+   rm ${migrationDir}/${qmgr}/"$CHT"_channel.txt 
 fi 
-if [ -f ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log ]; then
-   echo "" > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+if [ -f ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log ]; then
+   echo "" > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
 else
-   touch ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+   touch ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
 fi
-# start selected channels
 HOST=`hostname`
 TS=`date +%Y-%m-%d_%H:%M:%S`
-echo "$TS - starting $CHT channels $extstr for Queue Manager: ${qmgr} on host : $HOST" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+echo "$TS - stopping $CHT channels $extstr for Queue Manager: ${qmgr} on host : $HOST" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
 
-
+echo "display chstatus(*) WHERE(STATUS EQ STOPPED)" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr} 2>/dev/null "  > /tmp/${qmgr}_"$CHT"_chs.txt 
+retcode=$?
+grep AMQ8420 /tmp/${qmgr}_"$CHT"_chs.txt
+ret_grep=$? 
+# todo parse output and what about other channel types
+if [ $retcode != 0 ]; then
+   if [ $ret_grep != 0 ]; then 
+      echo "Not AMQ8420 : retcode is : $retcode ; exiting"
+      exit $retcode 
+   fi 
+fi	
+# list channels to stop
 if [ "${CHT}" = "ALL" ];then 
-	echo "dis channel(*) " | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr} 2>/dev/null  " > /tmp/${qmgr}_"$CHT"_dis_channel_sta.txt
-	dis_channel_rc=$?
-	if [ $dis_channel_rc != 0 ]; then
-		echo " dis channel return code is : $dis_channel_rc ; exiting"
-		exit $dis_channel_rc
-	fi 
+   grep CHLTYPE\(.*\) /tmp/${qmgr}_"$CHT"_chs.txt > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
 else
-	echo "dis channel(*) WHERE ( chltype EQ $CHT )" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/${qmgr}_"$CHT"_dis_channel_sta.txt
-	dis_channel_rc=$?
-	if [ $dis_channel_rc != 0 ]; then
-		echo " dis channel return code is : $dis_channel_rc ; exiting"
-		exit $dis_channel_rc
-	fi 
-	grep CHANNEL /tmp/${qmgr}_"$CHT"_dis_channel_sta.txt | grep -v SYSTEM. | awk ' { print $1 } ' > ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt
-   Obj_Listfile=${migrationDir}/${qmgr}/"$CHT"_start_channel.txt
+   grep CHLTYPE\($CHT\) /tmp/${qmgr}_"$CHT"_chs.txt > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
+   cmdstr=`echo "DISPLAY channel(*) WHERE ( chltype EQ $CHT )"`
+   echo "${cmdstr}" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/"${qmgr}"_"$CHT"_dis_channel.txt
+   ret_code=$?
+   if [ $ret_code != 0 ]; then
+      echo " dis channel ret_code is : $ret_code ; exiting "
+      exit $ret_code
+   fi	 
+   grep CHANNEL /tmp/"${qmgr}"_"$CHT"_dis_channel.txt | grep -v SYSTEM. | awk ' { print $1 } ' > ${migrationDir}/${qmgr}/"$CHT"_channel.txt
+   Obj_Listfile=${migrationDir}/${qmgr}/"$CHT"_channel.txt
 fi
-
+# stop channels 
 if [ ! -f "${Obj_Listfile}" ] ; then
    echo "Object list file not readable"
 else
    cat ${Obj_Listfile} | while read line
    do
 
-      echo "starting : $line" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
-      echo "start $line " | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/"${qmgr}"_"$CHT"_start_channel.txt 
-      sta_channel_rc=$?
-      amqerr=`grep AMQ /tmp/"${qmgr}"_"$CHT"_start_channel.txt`
-      grep -E "AMQ9533|AMQ9531" /tmp/"${qmgr}"_"$CHT"_start_channel.txt > /dev/null
+      CHLN=`echo $line | cut -d'(' -f2|cut -d')' -f1 `
+      if [ "$CHLN" != "${qmgr}.CL.ADM" ] ;
+      then 
+      echo "stopping : $line" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
+      echo "stop $line mode(force)" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" >   /tmp/"${qmgr}"_"$CHT"_stop_channel.txt
+       
+      ret_code_sto=$?
+      amqerr=`grep AMQ /tmp/"${qmgr}"_"$CHT"_stop_channel.txt`  
+      grep -E "AMQ9533|AMQ9531" /tmp/"${qmgr}"_"$CHT"_stop_channel.txt > /dev/null
       ret_grep=$?
-              
-      cat /tmp/"${qmgr}"_"$CHT"_start_channel.txt >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log 
 
-      # todo parse output
-      if [ $sta_channel_rc != 0 ]; then
-         if [ $ret_grep != 0 ]; then
+      # todo check output AMQ9533 is ok 
+      cat /tmp/"${qmgr}"_"$CHT"_stop_channel.txt >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
+      if [ $ret_code_sto != 0 ]; then 
+         if [ $ret_grep != 0 ]; then 
             echo "Warning: ${amqerr} for Channel : $line ; continuing"
-         fi
-         #   exit $sta_channel_rc
+            # exit $ret_code_sto 
+         fi 
+      fi	
+      else
+         echo "skipped Admin SVRCONN channel : $line " >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
       fi
-      
+       
    done
 fi
 
+#grep AMQ9533 ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
 TS=`date +%Y-%m-%d_%H:%M:%S`
-echo "$TS - removing work file $CHT_start_channel.txt" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
-if [ -f ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt ] ; then 
-   rm ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt 
-fi 
+
+echo "Waiting for channels to be stopped"
+sleep 10
+
+echo "--- SUMMARY ---"
+echo "Already stopped channels:"
+wc -l ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
+
+echo "$TS - removing work file $CHT_channel.txt" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
+if [ -f ${migrationDir}/${qmgr}/"$CHT"_channel.txt ] ; then 
+   rm ${migrationDir}/${qmgr}/"$CHT"_channel.txt
+fi
 exit 0
