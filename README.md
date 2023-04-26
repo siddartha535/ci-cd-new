@@ -1,162 +1,127 @@
-#!/bin/ksh
+#!/bin/bash
 ##############################################################################
 #
-# Script:         mqenablequeues.sh
+# Script:          mqinvokeforqmgr.sh
 #
-# Usage:          mqenablequeues.sh <qmgr> [filename]
+# Usage:          
 #
-# Description:    enable queues for put
-#                     
+# Description:     Checks if qmgr is running, adds vars for multiversion and invoke
+#                  
+#                  
 #
 # Remarks:         
 #                  
 #                  
-#                  
-#                  
 #
-# History:         2013-03-02   lreckru     add obj list in file as parameter
-#                                           each line must be like "QUEUE(name)"
-#                  2014-11-27   sanzmaj     multiversion
-#                               phutzel     checks
-#                                           
+# History:         2012-08-08   fdress     initial version
+#                  2013-09-23   lreckru    add some loggin infos with time stamp
+#				       2014-04-03   lreckru    add unset "Expiring global units of work" variables
 #
 ##############################################################################
-#
 #set -x
-#
+#new
+export SCRIPT_NAME=$(basename $0)
 
-# get full path to this script
-HOME=`readlink -f $0`
-HOME=`dirname $HOME`
+function checkAndInvoke {
+#set -x
+   qmgr=$1
+   MODE=$2
+   INCR=$3
+    p_info_ts "Performing checks for queuenanager $1 with mode $2 - look also at ${MQLOGNAME}-${qmgr}.log " >>${MQLOGNAME}.log
+	(  
+	    
+	    echo ""
+	    p_info_ts "Processing queue manager ${qmgr}"
+	    
+       # check if queue manager is there and accessible
+	    if [[ ${MQTOOLS_CHECK:-YES} = "YES" && ! -d ${MQ_LOG}/${qmgr}/active ]] ; then
+			p_error "No access to queue manager file system ${MQ_LOG}/${qmgr}/active"
+#			call_logger CRONMON 2 "No access to queue manager file system ${MQ_LOG}/${qmgr}/active"
+#new
+            call_logger CRONMON 2 ${qmgr} "${SCRIPT_NAME}:No access to queue manager file system ${MQ_LOG}/${qmgr}/active"
+	    else
+         # clear variables used in locals files
+   		unset STRTWMQ STRTBRK LOGCLEANUP MQUSER TIMEO AMQ_TRANSACTION_EXPIRY_RESCAN AMQ_XA_TRANSACTION_EXPIRY
 
-# call the common include
-. ${HOME}/mqinclude.sh
+			# set defaults
+			MQUSER=mqm
 
-if [ $# -lt 1 ] ; then
-  echo "Usage : $0 <qmgr> "
-  echo "No Queue Manager name supplied"
-  echo "You must supply a Queue Manager name "
-  echo "Use the command dspmq to see the list of installed Queue Managers"
-  echo "Exiting ..."
-  echo "for using a object list in a file, each line must look like  'QUEUE(name of queue)'"
-  exit 1
-fi
-qmgr=$1
+			# check config file
+		   if [[ ${MQTOOLS_CHECK:-YES} = "YES" && ! -f ${MQTOOLS_ETC}/locals_${qmgr} ]]; then
+               p_error "Queue Manager is on this system for ${qmgr} not configured !"
+               rc=1
+               return
+         fi
+		    
+		   # source config file
+         if [[ -f ${MQTOOLS_ETC}/locals_${qmgr} ]]; then
+		       . ${MQTOOLS_ETC}/locals_${qmgr}
+         fi
 
-# Checks and set multi-version vars
-mqsetenv -m $qmgr
 
-FileParam=false
-if [ $# -eq 2 ];then
-    Obj_Listfile=$2
-    FileParam=true
-    extstr="and objects from file $Obj_Listfile"
-  if [ ! -f ${Obj_Listfile} ] ; then
-      echo "Can't find object list file ${Obj_Listfile} "
-      exit 2
-  fi
-fi
+         # Take vars for MQ Multiversion
+         #. ${MQMHOME}/include/set_mqenv_vars.sh ${qmgr}  2>/dev/null  &&
+         #MQ_HOME=$MQMDIR                                            ||
+         #p_error_ts "Warning Multiversion include files were not executed correctly" >> ${MQLOGNAME}.log
+     
+         mqsetenv -m ${qmgr}
 
-echo "Working with Queue Manager : ${qmgr}  $extstr"
+         # invoke main function from called script
+                 invoke ${qmgr} $MODE ${INCR}
+	    fi
+       
+    ) | ( ${su_cmd_pre}"tee -a ${MQLOGNAME}-${qmgr}.log" 2>/dev/null ) # ignore following output 'stty: standard input: Invalid argument'
+}
 
-platform=`uname`
+############################### Main #######################################
 
-if [ "${migrationDir}" = "" ]; then
-	if [ $platform = 'CYGWIN_NT-5.1' ]; then
-	  migrationDir=`dirname $0`/../migration
-	else
-	  migrationDir=/var/mw/mqbackup
-	fi
-fi
+# remove last extention from script name for logging file name"abcd.*" -> "abc"
+MQLOGNAME=$MQTOOLS_LOG/${MQSCRIPT%.*}
 
-echo "Use migration directory ${migrationDir}"
-
-# ensure we have a migration directory
-if [ ! -d $migrationDir ];then
-	mkdir $migrationDir
-fi
-
-# ensure we have a directory per queue manager
-if [ ! -d ${migrationDir}/${qmgr} ];then
-	mkdir ${migrationDir}/${qmgr}
-fi
-
-if [ -f ${migrationDir}/${qmgr}/enable.queue.txt ]; then 
-  rm ${migrationDir}/${qmgr}/enable.queue.txt 
-fi 
-if [ -f ${migrationDir}/${qmgr}/enable_queue_status.log ];
-then
-  echo "" > ${migrationDir}/${qmgr}/enable_queue_status.log
-else
-  touch ${migrationDir}/${qmgr}/enable_queue_status.log
-fi
-HOST=`hostname`
-TS=`date +%Y-%m-%d_%H:%M:%S`
-echo "$TS - enabling queue PUT for Queue Manager: ${qmgr} on host : $HOST" >> ${migrationDir}/${qmgr}/enable_queue_status.log
-
-if [ $FileParam = false ];
-then
-	echo "display queue(*)" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/${qmgr}_dis_ena_qlocal.txt
-	ret_dis_ena=$?
-	if [ $ret_dis_ena != 0 ]; then
-		echo "ret_dis_ena is : $ret_dis_ena ; exiting "
-		exit $ret_dis_ena
-	fi	 
-else
-   echo "" > /tmp/${qmgr}_dis_ena_qlocal.txt
-   while read line
-  do
-	  	echo "display $line TYPE" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" | grep -v "display $line" >> /tmp/${qmgr}_dis_ena_qlocal.txt
-		ret_dis_ena=$?
-		if [ $ret_dis_ena != 0 ]; then
-			echo "ret_dis_ena is : $ret_dis_ena ; exiting "
-			exit $ret_dis_ena
-		fi	   
-  done < ${Obj_Listfile}
+if [[ -z "$1" ]]; then
+      p_error_ts " No Parameter  -all or {qmgrname}" >>${MQLOGNAME}.log
+      exit 1
 fi
 
-	awk '{ if(match($1,"QUEUE\\(") > 0) { queue=$1 } if(match($1,"TYPE\\(") > 0) { print queue " " $1} if(match($2,"TYPE\\(") > 0) {print queue " " $2} }' /tmp/${qmgr}_dis_ena_qlocal.txt > ${migrationDir}/${qmgr}/enable.queue.txt
-    Obj_Listfile=${migrationDir}/${qmgr}/enable.queue.txt
+p_info_ts "Start script ${MQSCRIPT}" >>${MQLOGNAME}.log
 
-echo "enable queues..."
-while read line
-  do
-    QueueName=`echo $line|cut -d'(' -f2|cut -d')' -f1`
-    ProcessQueue=true
-    case $QueueName in
-    	SYSTEM*) ProcessQueue=false;;
-    	*MSGTR.LOG*) ProcessQueue=false;;
-    	*MSGTR.TRC*) ProcessQueue=false;;
-    	MQMON*) ProcessQueue=false;;
-    	AMQ.*) ProcessQueue=false;;
-    esac
-    	
-    if [ $ProcessQueue = true ] ;
-    then 
-      QueueType=`echo $line|cut -d' ' -f2|cut -d'(' -f2|cut -d')' -f1`
-      echo "setting to PUT enabled : $line" >> ${migrationDir}/${qmgr}/enable_queue_status.log
-      echo "alter $QueueType('$QueueName') PUT(ENABLED)" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}"  > /tmp/"${qmgr}"_enable_queue.txt
-      ret_put_ena=$?
-      amqerr=`grep AMQ /tmp/"${qmgr}"_enable_queue.txt`
-      grep AMQ8147 /tmp/"${qmgr}"_enable_queue.txt > /dev/null
-      ret_grep=$?
-      
-      cat /tmp/"${qmgr}"_enable_queue.txt >> ${migrationDir}/${qmgr}/enable_queue_status.log
-      # todo parse output not error AMQ8147: WebSphere MQ object MQMON.FDRESSLE.4BFBB08220001658 not found. 
-      if [ $ret_put_ena != 0 ]; then
-        if [ $ret_grep != 0 ]; then 
-            echo "Warning: ${amqerr} for Queue : $Queue ; continuing"
-            # exit $ret_put_ena
-        fi
+$(type invokestartup 2>/dev/null|grep -q 'is a function')
+	  if [[ "$?" -eq "0" ]];then
+	  	p_info_ts "call function invokestartup" >>${MQLOGNAME}.log
+	  	invokestartup | ${su_cmd_pre}"tee -a ${MQLOGNAME}.log"
       fi
-      echo $QueueName	
-    else
-      echo "skipped queue : $line " >> ${migrationDir}/${qmgr}/enable_queue_status.log
-    fi
-  done < ${Obj_Listfile}
-TS=`date +%Y-%m-%d_%H:%M:%S`
-echo "$TS - removing work file enable.queue.txt" >> ${migrationDir}/${qmgr}/enable_queue_status.log
-if [ -f ${migrationDir}/${qmgr}/enable.queue.txt ]; then 
-  rm ${migrationDir}/${qmgr}/enable.queue.txt 
-fi 
-exit 0
+      
+if [[ "$1" = "-all" ]]; then
+      p_info_ts "Invoked for all queuemanagers" >>${MQLOGNAME}.log
+      # comment while read and use instead for --- with the first one I have seen some issues in our suse test server
+      #ls -1 ${MQTOOLS_ETC}/locals_* | while read LOCALSFILE
+      for LOCALSFILE in `ls -1 ${MQTOOLS_ETC}/locals_*`      
+      do
+       # just filename
+          FILENAME=`basename ${LOCALSFILE}`
+          # extract name of qmgr
+          qmgr=${FILENAME#locals_}
+          #   p_info_ts "Invoke ${qmgr} from all" >>${MQLOGNAME}.log 
+          if [[ "$2" = "-increment" ]]; then
+                arg3=$2
+                  checkAndInvoke ${qmgr} MULTIPLE ${arg3}
+          fi
+          if [[ -z "$2" ]]; then
+          checkAndInvoke ${qmgr} MULTIPLE
+          fi
+
+      done       
+ else
+      # invoke for passed queue manager 
+      p_info_ts "Invoked for single queuemanager" >>${MQLOGNAME}.log
+        if [[ "$2" = "-increment" ]]; then
+                arg4=$2
+                  checkAndInvoke $1 SINGLE ${arg4}
+          fi
+          if [[ -z "$2" ]]; then
+      checkAndInvoke $1 SINGLE
+ fi
+
+
+ fi
+ p_info_ts "End of script ${MQSCRIPT}" >>${MQLOGNAME}.log
