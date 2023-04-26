@@ -1,91 +1,80 @@
-#!/bin/ksh
-##############################################################################
-#$Id: mqqueueaut.sh,v 1.1 2012/02/16 15:17:51 emea\fdressle Exp $
-#
-# Script:         mqqueueaut.sh
-#
-# Usage:          mqqueueaut.sh -qmgr <qmgrname> -queue <queuename> [-group <groupname>] [-hop]
-#
-# Description:    applies put authorities for application and/or channel
-#                  
-#                     
-#
-# Remarks:         
-#                  
-#                  
-#                  
-#                  
-#
-# History:        2012/02/16  fdressle
-#                 2014/11/25  sanzmaj  multiversion support
-#
-##############################################################################
-#set -x
+#!/bin/bash
 
+PROG=`readlink -f $0`
 
-# get full path to this script
-HOME=`readlink -f $0`
-HOME=`dirname $HOME`
+if [[ $# -eq 0 || $# -ne 2 ]]
+then
+        echo "Usage: $PROG -all -json"
+fi
 
-# call the common include
-. ${HOME}/mqinclude.sh
+if [[ $1 == "-all" ]]
+then
+        qmgrs=$(dspmq | grep -i "Running" | sed 's/)/(/g' | awk -F "(" '{print $2}')
+        qmgrcount=$(dspmq | grep "Running" | wc -l)
+fi
 
-function usage {
-   echo "Usage: $MQSCRIPT -qmgr <qmgrname> -queue <queuename> [-group <groupname>] [-hop]"
-   echo ""
-   echo "qmgrname:   Name of queue manager."
-   echo "queuename:  Name of queue for which oam is applied."
-   echo "groupname:  Name of application group used for put authorization. Optional."
-   echo "hop:        Remote queue is used to forward messages. Grant receivers. Optional."
-   exit 1
+#function to get the number of threads per Queue Manager
+get_no_of_threads() {
+		#get the process id's for the Queue Manager
+        value=$(ps -ef | grep $1 | grep -v grep | awk -F " " '{print $2}')
+        threadcount=0
+        for val in $value
+        do
+        		#get the number of threads for the PID
+                #threads=$(ps -e -T | grep $val | grep -v grep | wc -l)
+                threads=0
+                threads=$(ps -e -T | awk '{ if ($1 == '$val') { print } }' | wc -l)
+                #threadcount=`expr $threadcount + $threads`
+                let threadcount=${threadcount}+${threads}
+        done
+        echo $threadcount
 }
 
-if [ $# -eq 0 ]; then
-   usage
-fi
+#function to get the shared memory segments per Queue Manager
+get_shared_memory_bytes(){
+        bytescount=0
+        #get the process id's for the Queue Manager
+        value2=`ps -ef | grep $1 | grep -v grep | awk '{print $2}'`
 
-while [ $# -ne 0 ]; do
-   case $1 in
-      # lower case
-      -group)
-         typeset -l ${1#-}="$2";shift;;
-	     		
-      # upper case
-      -qmgr|-queue)
-         typeset -u ${1#-}="$2";shift;;
-	     		
-      # single
-      -hop)
-         typeset ${1#-}="true";;
-      -*) echo "Unkown option $1";exit 2;;
-      *)  ;;
-   esac
-   shift
-done
+        for val2 in $value2
+        do
+				#get the semaphores id for the processes
+                semid=$(ipcs -p | awk '{ if ($3 == '$val2') { print } }' | awk '{print $1}')
+                for sem in $semid
+                do
+                		#get the amount of shared memory segments in bytes for each semaphore Id
+                        by=$(ipcs -a |  awk '{ if ($2 == '$sem') { print } }' | awk '{print $5}')
+                        #bytescount=`expr $bytescount + $by`
+                        let bytescount=${bytescount}+${by}
+                done
+        done
+        echo $bytescount
+}
 
-if [[ -z "${qmgr}" || -z "${queue}" ]]
+print_data(){
+        echo "{\"qmgr\": \"$1\",\"shm\":" `get_shared_memory_bytes $1`",\"threads\":" `get_no_of_threads $1`"}"
+}
+
+print_json_format_data(){
+		ctr=0
+		echo "{\"qmgrs\": ["
+		for qmgr in $qmgrs
+		do
+        		#ctr=`expr $ctr + 1`
+        		let ctr=${ctr}+1
+        		if [[ $ctr != $qmgrcount ]]
+        		then
+                		echo `print_data $qmgr`","
+        		fi
+        		if [[ $ctr == $qmgrcount ]]
+        		then
+                		print_data $qmgr
+        		fi
+		done
+		echo "]}"
+}
+
+if [[ $2 == "-json" ]]
 then
-   echo "Missing required options."
-   exit 1
-fi
-
-
-# Checks and set multi-version vars
-mqsetenv -m $qmgr
-
-
-# TODO check if queue contains wildcards
-
-if [[ ! -z "${group}" ]]
-then
-   ${su_cmd_pre} "${MQ_HOME}/bin/setmqaut -m ${qmgr} -t q -n \"${queue}\" -g \"${group}\" -all +put +inq"
-   ${su_cmd_pre} "${MQ_HOME}/bin/dspmqaut -m ${qmgr} -t q -n \"${queue}\" -g \"${group}\""
-fi
-
-if [[ ! -z "${hop}" ]]
-then
-   ${su_cmd_pre} "${MQ_HOME}/bin/setmqaut -m ${qmgr} -t q -n "${queue}" -g mcadlq -n \"${queue}\" -all +put +setall"
-   ${su_cmd_pre} "${MQ_HOME}/bin/dspmqaut -m ${qmgr} -t q -n "${queue}" -g mcadlq"
-   ${su_cmd_pre} "${MQ_HOME}/bin/setmqaut -m ${qmgr} -t q -n "${queue}" -g mcauser -all +put +setall"
-   ${su_cmd_pre} "${MQ_HOME}/bin/dspmqaut -m ${qmgr} -t q -n "${queue}" -g mcauser"
+        print_json_format_data
 fi
