@@ -1,461 +1,578 @@
-#!/bin/ksh
-##############################################################################
-#$Id: mqcheck.sh,v 1.24 2011/10/25 15:56:04 EMEA\lreckru Exp $
-#
-# Script:         mqcheck.sh
-#
-# Usage:          mqcheck.sh  <queue manager>
-#
-# Description:
-#
-# Remarks:
-#
-# History:         
-#       Name:        checkmq
-#       Funktion:    ueberpruefen der Queuemanager- und WBIMB-Broker Prozesse
-#       Autor:       Hartmut Barkawitz
-#       Datum:       17.12.2004
-#
-#       geaendert:   Hartmut Barkawitz     09. Januar 2006
-#                    Englische Ausgabetexte
-#
-#       2011-08-04   lreckru    initial new version, new function chk_service
-#       2012-07-18   lreckru    add new function "check_fs_and_env" 
-#       2014-11-17   sanzmaj    multiversion
-#                    phutzel    checks
-#       2014-12-18   lreckru    recreate output  
-#       2015-08-13   lreckru    change add some return codes 
-#                               
-##############################################################################
-#set -x
 
-# Rc values - 1 parametererror, 2 warning, 3 error , 4 error
- 
-# get full path to this script
-HOME=`readlink -f $0`
-HOME=`dirname $HOME`
+#!/bin/bash
 
-# call the common include
-. ${HOME}/mqinclude.sh
-
-if [[ $# -eq 0 ]]; then
-        echo "/opt/mw/mqm/bin/mqcheck.sh <QMGR NAME> | -all"
-        exit 1;
+if [[ "$USER" != "root" ]]; then
+  echo "Script must be run as  root"
+  printf "exiting with code 5 since user is differnt\n"
+  exit
 fi
 
-function chk_service
-{
-# check running
+SECONDS=0
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+BLUE_LINE="echo -e "${BLUE}***********************************************${NC}" "
+printError   ()  { echo -e   "${RED}ERROR: $@" ${NC}; }
+printInfo ()  { echo -e   "${GREEN}INFO: $@" ${NC}; }
+getListenerControl() { echo 'dis listener(LISTENER.DEFAULT.01) CONTROL ' | su - mqm -c ". mqsetenv $1 ;runmqsc $1 "| grep CONTROL\( | cut -c 52-57 ; }
+getListenerControlqmgr() { echo 'dis listener(LISTENER.DEFAULT.01) CONTROL ' | su - mqm -c ". mqsetenv $1 ;runmqsc $1 "| grep CONTROL\( | cut -c 52-55 ; }
+getQmgrImgsched () { echo 'dis qmgr IMGSCHED' | su - mqm -c " . mqsetenv $1; runmqsc $1" | grep AUTO| awk '{print $2}' | cut -c 10-13 ; }
+getImgInterval () { echo 'dis qmgr IMGINTVL' | su - mqm -c " . mqsetenv $1 ; runmqsc $1" | grep 1440 | awk  '{print $2}' | cut -c 10-13 ; }
+getamqpcontrol() { echo 'dis service(SYSTEM.AMQP.SERVICE) control' | su - mqm -c ". mqsetenv $1; runmqsc $1" | grep MANUAL | awk '{print $2}' | cut -c 9-14 ;}
+alterQmgrImgsched () { echo 'alter qmgr IMGSCHED(AUTO)' | su - mqm -c " . mqsetenv $1; runmqsc $1" ; }
+alterQmgrImgInvl () { echo 'alter qmgr IMGINTVL(1440)' | su - mqm -c " . mqsetenv $1 ; runmqsc $1" ; }
+alterListenerControl () { control=$2; echo "alter listener (LISTENER.DEFAULT.01) TRPTYPE(TCP) "$control" "|su - mqm -c ". mqsetenv $1;runmqsc $1" ; }
+disauthinfoidpwldap () { echo 'dis authinfo(SYSTEM.DEFAULT.AUTHINFO.IDPWLDAP) ADOPTCTX' | su - mqm -c " . mqsetenv $1; runmqsc $1" | grep ADOPTCTX | awk '{print $2}'| cut -c 10-12 ; }
+disauthinfoidpwos () { echo 'dis authinfo(SYSTEM.DEFAULT.AUTHINFO.IDPWOS) ADOPTCTX' | su - mqm -c " . mqsetenv $1; runmqsc $1" | grep ADOPTCTX | awk '{print $2}'| cut -c 10-12 ; }
+migratingQmgr () { su - mqm -c ". mqsetenv $1; /opt/mqm910/bin/setmqm -m $1 -n $(/opt/mqm910/bin/dspmqver -bf 512)" ; }
 
-   runall=yes
-   OBJCLASS=$1
-   FILTER1=$2
-   FILTER2=$3
-   OBJECT=$4
-
-   RUNIST=$(echo "DISPLAY ${OBJCLASS}(${OBJECT}) where (CONTROL EQ QMGR) ALL" |  do_as_mqm ${qmgr} "${MQ_HOME}/bin/runmqsc ${qmgr}" 2>/dev/null |grep ${FILTER1} | grep ${FILTER2} | grep -v dis| sed -e 's/(/ /' -e 's/)/ /' |awk '{print $2}')
-
-# set new parameters
-   OBJCLASS=$5
-   FILTER1=$6
-   FILTER2=$7
-
-   RUNSOLL=`echo "DISPLAY ${OBJCLASS}(${OBJECT}) where (CONTROL EQ QMGR) ALL" |  do_as_mqm ${qmgr} "${MQ_HOME}/bin/runmqsc ${qmgr}" 2>/dev/null |grep ${FILTER1} | grep ${FILTER2} | grep -v dis| sed -e 's/(/ /' -e 's/)/ /' |awk '{print $2}'`
-
-   for OBJECT1 in $RUNSOLL
-   do
-   #   echo "DIS $1 (${OBJECT1}) " |  do_as_mqm ${qmgr} "${MQ_HOME}/bin/runmqsc ${qmgr}"  2>/dev/null | grep ${OBJECT1} | grep -v STDERR |grep -v AMQ | grep -v "DIS $1 (${OBJECT1})"
-      if [ `echo $RUNIST | grep $OBJECT1 | wc -l` -ne 1 ]; then
-                p_warning "$(printf "%-35s %s" ${OBJECT1} 'NOT RUNNING')"
-                  if [[ $q_rc -lt 2 ]];then
-                                q_rc=2
-                                  fi
-              else
-                  p_info "$(printf "%-35s %s" ${OBJECT1} RUNNING)"
-              fi
-        done
-}
-
-
-function put_get
-{
- 
-   mqstext="TestNachricht"
-   queue=SYSTEM.DEFAULT.LOCAL.QUEUE
-   persist=-ap
-   mqsintext=/tmp/mqsintext.txt
-   mqsouttext=/tmp/mqsouttext.txt
-   username=mqm
-   mqsuser="-U ${username}"
-   echo ${mqstext}>${mqsintext}
-
-   p_info "Check write/read a message"
-   # clear all message from queue    
-    do_as_mqm ${qmgr} "${MQTOOLS_HOME}/bin/q -I ${queue} -m ${qmgr} -F ${mqsouttext} ${mqsuser} >/dev/null 2>&1" 
-   rc=$?
-   [[ -f ${mqsouttext} ]] && rm ${mqsouttext}
-   if [ $rc -ne 0 ] ; then
-   
-      ##
-      ## amqsget & amqsput
-      ## 
-      p_info "q command not work, trying with amqsget and amqsput (needs 30 sec)"
-      # clean messages with amqsget
-       do_as_mqm ${qmgr} "${MQ_HOME}/samp/bin/amqsget ${queue} ${qmgr} >/dev/null 2>&1"  
-
-      # write persistent message to queue
-       do_as_mqm ${qmgr} "${MQ_HOME}/samp/bin/amqsput ${queue} ${qmgr} < ${mqsintext}   >/dev/null 2>&1" 
-      rc=$?
-      
-      if [[ ${rc} -eq 0 ]];then
-         # read persistent message from queue
-          do_as_mqm ${qmgr} "${MQ_HOME}/samp/bin/amqsget ${queue} ${qmgr} | grep \"^message \" | sed 's/message <//g;s/>$//g' > ${mqsouttext} 2>&1"
-         rc=$? 
-         
-            if [[ ${rc} -eq 0 ]];then
-               # compare write and read message
-               diff ${mqsouttext} ${mqsintext}
-               rc=$?
-               if [[ ${rc} -eq 0 ]];then
-                  p_info "Message write/read sucessfull."
-               else
-                  p_info "The read message is not equal to the written message."
-               fi
-               rm ${mqsouttext}
-            else
-               p_error "Can't read the persistent message from the queue."
-            fi
-            rm ${mqsintext}
-         
-      else
-         p_error "Can't write the persistent message in the queue."        
-      fi
-      
-   else
-   
-      ##
-      ## q command
-      ##
-      
-      # write persistent message to queue
-       do_as_mqm ${qmgr} "${MQTOOLS_HOME}/bin/q -o ${queue} -m ${qmgr} -F ${mqsintext} ${mqsuser} ${persist} >/dev/null 2>&1"
-      rc=$?
-      
-      if [[ ${rc} -eq 0 ]];then
-         # read persistent message from queue
-          do_as_mqm ${qmgr} "${MQTOOLS_HOME}/bin/q -I ${queue} -m ${qmgr} -F ${mqsouttext} ${mqsuser} >/dev/null 2>&1"
-         rc=$?
-         
-            if [[ ${rc} -eq 0 ]];then
-               # compare write and read message
-               diff ${mqsouttext} ${mqsintext}
-               rc=$?
-               if [[ ${rc} -eq 0 ]];then
-                  p_info "Message write/read sucessfull."
-               else
-                  p_info "The read message is not equal to the written message."
-               fi
-               rm ${mqsouttext}
-            else
-               p_error "Can't read the persistent message from the queue."
-            fi
-            rm ${mqsintext}
-         
-      else
-         p_error "Can't write the persistent message in the queue."       
-      fi
-      
-   fi
-q_rc=$rc  
-return $q_rc
-}
-
-
-function check_fs_and_env
-{
-
-# checking for variables 'server =' and 'scan_group ='
-#grep "[e|u][r|p] = " /etc/tlmagent.ini 1>2 2>/dev/null
-#if [[ $? -eq 0 ]];then
- #       rc=0
-  #      p_info "check for ILMT variable 'server =' and 'scan_group ='"
-   #     grep "[e|u][r|p] = " /etc/tlmagent.ini | sed 's/^/          /'
-#else
-#        p_warning "check for ILMT variable 'server =' and 'scan_group ='"
- #       rc=1
-#fi
-if [[ `id -u -n` = "root" ]];then
-	p_info "pvscan"
-	pvscan|sed 's/^/        /'
-else
-	p_info "pvscan - only if script called as root"
-fi
-
-#echo Sample output:
-# PV /dev/sdd    VG data2vg   lvm2 [234.00 GiB / 234.00 GiB free]
-# PV /dev/sdc    VG data1vg   lvm2 [101.00 GiB / 75.81 GiB free]
-# PV /dev/sdb1   VG vgswap    lvm2 [3.97 GiB / 64.00 MiB free]
-# PV /dev/sda2   VG vg00      lvm2 [19.72 GiB / 3.25 GiB free]
-# Total: 4 [358.68 GiB] / in use: 4 [358.68 GiB] / in no VG: 0 [0   ]
-#
-# important 
-# data2vg   must be on   /dev/sdd and 
-# data1vg   must be on   /dev/sdc 
-#
-q_rc=$rc  
-return $q_rc
+alterQmgrListenerControlManual () {
+    alterListenerControl ${qmgr} "CONTROL(MANUAL)"
+    control=$( getListenerControl ${qmgr})
+    [ "${control}" = "MANUAL" ]
 
 }
 
-##
-##  INVOKE
-##  
+alterQmgrImgschedtoAUTO () { alterQmgrImgsched ${qmgr} ;imgsched=$(getQmgrImgsched ${qmgr} ) ; [ "${imgsched}" = "AUTO" ] ; }
+alterQmgrImgIntvlto1440 () { alterQmgrImgInvl ${qmgr} ; imgintvl=$( getImgInterval ${qmgr} ) ; [[ "${imgintvl}" -eq 1440 ]] ; }
+alterListenerControltoQMGR () { alterListenerControl ${qmgr} "CONTROL(QMGR)"; control=$( getListenerControlqmgr ${qmgr}); [ "$control" = "QMGR" ] ; }
 
-function invoke {
-   rc=0
-   
-syntax() {
-  echo "Syntax : ${MQSCRIPT}  <queue manager>|-all "
-  ende $1
+alterauthinfoLDAPtoYes () {
+echo 'alter authinfo(SYSTEM.DEFAULT.AUTHINFO.IDPWLDAP) AUTHTYPE(IDPWLDAP) ADOPTCTX(YES)' | su - mqm -c " . mqsetenv $1; runmqsc $1"
+idpwldap=$( disauthinfoidpwldap ${qmgr})
+[ $idpwldap = "YES" ]
 }
 
-ende() {
-  p_error_ts "Qmgr: ${qmgr}"
-  p_linie
-  exit $q_rc
+alterauthinfoOStoYes () {
+echo 'alt authinfo(SYSTEM.DEFAULT.AUTHINFO.IDPWOS) AUTHTYPE(IDPWOS) ADOPTCTX(YES)' | su - mqm -c " . mqsetenv $1; runmqsc $1"
+idpwos=$( disauthinfoidpwos ${qmgr})
+[ $idpwos = "YES" ]
 }
 
-# Wurde Name des Queue-Managers uebergeben ?
-if [ -z "$1" ] ; then
-  syntax $1
-else
-   typeset -u qmgr=$1
-fi
-
-if [ ! -d ${MQ_LOG}/${qmgr} ] ; then
-   p_warning "There is no queue manager $bold${qmgr}$off created on this server !!!"
-   if [[ $q_rc -lt 2 ]];then
-               q_rc=2
-   fi
-   return $q_rc
-fi
-
-case "$PLATFORM" in
- "HP-UX")
-    if [ ! -d ${MQ_DATA}/${qmgr} ] ; then
-       p_warning "The queue manager $bold${qmgr}$off is not running on this node !!!"
-       if [[ $q_rc -lt 2 ]];then
-               q_rc=2
-       fi
-       return $q_rc
+mqstopQmgr () {
+    /opt/mw/mqm/bin/mqstop.sh ${qmgr} &>/dev/null &
+    if [[ $(rpm -qa | grep MQSeriesXR | wc -l) -gt 0 ]]; then
+        echo "This is an IIB Server, Stopping of ${qmgr} takes minimum of 20 minutes. Please have patience"
+        TIMER=2100
+    else
+        TIMER=20
     fi
-    ;;
- "SunOS")
-    if [ ! -d ${MQ_DATA}/${qmgr} ] ; then
-       p_warning "The queue manager $bold${qmgr}$off is not running on this node !!!"
-       if [[ $q_rc -lt 2 ]];then
-               q_rc=2
-       fi
-       return $q_rc
+    PID=$!;echo $PID;sleep $TIMER
+    mqprocess=$(ps -ef |grep -v grep| awk '{print $2}' | grep $PID|  wc -l )
+    echo $mqprocess
+    if [[ $mqprocess -eq 0 ]]; then
+        echo "${qmgr} is stopped"
+    else
+        echo "${qmgr} is not stopped yet, waiting for more time"
+        sleep 20
+        mqprocess=$(ps -ef |grep -v grep| awk '{print $2}' | grep $PID|  wc -l )
+        if [[ $mqprocess -gt 0 ]]; then
+            echo "Exiting the script as the ${qmgr} is not in stopped state. Please stop the ${qmgr} manually and re-run the mq91migration.sh script"
+            exit "RC=$RC"
+        else
+            echo "${qmgr} is stopped successfully. Please proceed with the further steps"
+        fi
     fi
-    ;;
- "AIX")
-    QmgrAktiv="N"
-    for VolGr in `lsvg`
+    }
+
+mqstartQmgr () {
+    /opt/mw/mqm/bin/mqstart.sh ${qmgr}
+    ${BLUE_LINE}
+    [[ "$(dspmq | grep ${qmgr} | awk '{print $2}' | cut -c 8-14)" = "Running" ]]
+}
+
+
+Date=$(date +%F_%T)
+RC=0; success="" ; failure=""
+backupDir=/var/mw/mqbackup/migration910
+[[ -d ${backupDir} ]] || mkdir ${backupDir}
+chown -R mqm:mqm ${backupDir}
+
+qmgrss=$(dspmq |awk '{print $1}' | sed 's/QMNAME//' | sed 's/(//' |sed 's/)//')
+if [[ -s /etc/bu/nomqmigration ]]; then
+  for qmgr in ${qmgrss}; do
+    if [[ $(cat /etc/bu/nomqmigration | grep -w $qmgr | wc -l ) -eq 0 ]]; then
+      qmgrs=$(echo $(  echo $qmgr $qmgrs ))
+    fi
+  done
+else
+    qmgrs=$(dspmq |awk '{print $1}' | sed 's/QMNAME//' | sed 's/(//' |sed 's/)//')
+fi
+
+#totalNosQmgrs=$( echo ${qmgrs} | wc -l }
+
+check_rc ()
+{
+  returncode=$1; infoString=$2; failString=$3; filecounter=$4; qmgr=$5
+  if [[ $returncode -ne 0 ]]; then
+    RC=$(( RC + 1 ))
+    printError "$failString"
+    echo "RC=$RC"
+    exit $RC
+  else
+    if [[ ! -z $infoString ]]; then
+      printInfo "$infoString" ; RC=0;
+    [ -z "$filecounter" ] ||   touch ${backupDir}/${qmgr}_${filecounter}.txt
+    else
+      RC=0;
+     [ -z $filecounter ] || touch ${backupDir}/${qmgr}_${filecounter}.txt
+    fi
+  fi
+}
+
+chgown ()
+{
+  local qmgr=$1
+  chown mqm:mqm ${qmgr}
+  check_rc $? "Ownership changed successfully" "Failed to change the ownweship of ${qmgr}... exiting the program "
+}
+
+backup_qmgrs ()
+{
+  echo -e "${GREEN}Taking Backup of Qmgr ${NC}"
+  for qmgr in ${qmgrs}
+  do
+    echo -e "${GREEN}Step:6 Stopping qmgr/qmgrs ${NC}"
+    counter=6
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "${qmgr} is already in stopped state"
+    else
+        mqstopQmgr ${qmgr}    
+        check_rc $? "${qmgr} is stopped successfully" "Exiting the program as the ${qmgr} is not in stopped state" $counter  $qmgr
+    fi
+
+    ${BLUE_LINE}
+
+    echo -e "${GREEN}Step:7 Starting Backup of Queue Manager ${qmgr}${NC}"
+    counter=7
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "Backup of Qmgr is already taken successfully"
+    else
+        if [[ -f /etc/bu/mw_noqfilebackup ]]; then
+            echo "Excluding Backing of Queue Files for MSB QMGR : $qmgr"
+            tar --exclude="/var/mqm/qmgrs/${qmgr}/queues" -cvzf /var/mw/mqbackup/migration910/MQmigration-${qmgr}-MQv9-to-MQv91.tar.gz /var/mqm/qmgrs/${qmgr} /var/mqm/log/${qmgr}
+        else
+            tar -cvzf /var/mw/mqbackup/migration910/MQmigration-${qmgr}-MQv9-to-MQv91.tar.gz /var/mqm/qmgrs/${qmgr} /var/mqm/log/${qmgr}
+        fi
+        [[ -f ${backupDir}/MQmigration-${qmgr}-MQv9-to-MQv91.tar.gz ]]
+        check_rc $? "Backup has been successfully, backup can be founder under /var/mw/mqbackup/migration910/${bfile}" "We are exiting the program as the backup file is not found under the backup dir" "${counter}" "${qmgr}"
+    fi
+  done
+}
+
+channels_queues_status_check_beforemigration ()
+{
+  local qmgr=$1
+  echo -e "${GREEN}Start the channel and check the channel & queue status for ${qmgr} ${NC}"
+  . mqsetenv ${qmgr}
+  su mqm -c "ksh /opt/mw/mqm/bin/mqstartchannels.sh ${qmgr} SDR"
+  sleep 10;
+  echo "display chstatus(*) where (STATUS NE RUNNING)" |su mqm -c "runmqsc ${qmgr}" > /var/mw/mqbackup/migration910/${qmgr}_${Date}_retrying_chstatus_beforemigrtion.log
+  echo "display qs(*) where (CURDEPTH GT 0)" |su mqm -c "runmqsc ${qmgr}" > /var/mw/mqbackup/migration910/${qmgr}_${Date}_qstatus_beforemigration.log  
+}
+
+channels_queues_status_check_aftermigration ()
+{
+  local qmgr=$1
+  echo -e "${GREEN}Start the channel and check the channel & queue status for ${qmgr} ${NC}"
+  . mqsetenv ${qmgr}
+  su mqm -c "ksh /opt/mw/mqm/bin/mqstartchannels.sh ${qmgr} SDR"
+  sleep 10;
+  echo "display chstatus(*) where (STATUS NE RUNNING)" |su mqm -c "runmqsc ${qmgr}" > /var/mw/mqbackup/migration910/${qmgr}_${Date}_retrying_chstatus_aftermigration.log
+  echo "display qs(*) where (CURDEPTH GT 0)" |su mqm -c "runmqsc ${qmgr}" > /var/mw/mqbackup/migration910/${qmgr}_${Date}_qstatus_aftermigration.log
+}
+
+
+Update_config ()
+{
+  file=$1
+  string=$2
+  while read line
+  do
+    if [[ $( echo "$line" | grep -v "^#"|wc -l ) -eq 1 ]]; then
+      if [ -n "$line" ]; then
+      last_line=$(echo $line)
+      fi
+    fi
+  done<$file
+ 
+  sed -i "/${last_line}/a ${string}"  ${file}
+  if [[ $(cat ${file}| grep ${string} | wc -l ) -eq 1 ]]; then
+    echo " $file is updated successfully ..."
+  fi
+}
+
+migrating_qmgrs ()
+{
+  echo -e  "${GREEN}Starting the migration process${NC}"
+  for qmgr in ${qmgrs}
+  do
+    chgown "/etc/mw/mqm/locals_${qmgr}"
+  done
+  chgown "/var/mqm/errors"
+  chgown "/var/mw/backup"
+  chgown "/var/mqm/trace"
+ 
+  ${BLUE_LINE}
+   
+  echo -e "${GREEN}Step:1 Taking the backup of the Queue Manager  status${NC}"
+  for qmgr in ${qmgrs}; do
+  counter=1
+  if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "Backup of /var/mw/backup/current/mqm/${qmgr} is already taken"
+  else
+        /opt/mw/bin/mw_backup.sh
+        check_rc $? "Backup completed successfuly" "Program is getting exit due to failure of backup process" "${counter}" "${qmgr}"
+  fi
+  done
+
+  ${BLUE_LINE}
+ 
+  echo -e "${GREEN}Step:2 Performing clean-up of transactions logs${NC}"
+  for qmgr in ${qmgrs}; do
+    counter=2
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "MQ Logcleanup is already completed successfully"
+    else
+        /bin/su - mqm -c "/opt/mw/mqm/bin/mqlogcleanup.sh ${qmgr}"
+        check_rc $? "Logcleanup happened successfully for ${qmgr}" "We are exiting the program due to failure of logcleanup on ${qmgr}" "${counter}" "${qmgr}"
+    fi
+  done
+
+  ${BLUE_LINE}
+ 
+  echo -e "${GREEN}Step:3 channel & queue status check${NC}"
+  for qmgr in ${qmgrs}
+  do
+    counter=3
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "Channel and Queue status checks were already done successfully for ${qmgr} and the output can be found under ${backupDir}"
+    else
+        channels_queues_status_check_beforemigration ${qmgr}
+        check_rc $? "Channel and Queue status check files for ${qmgr} are available under ${backupDir}" "Exiting the program as the Channel and the Queue Stauts files are not found for ${qmgr}" "${counter}" "${qmgr}"
+        echo "$(ls -ltr ${backupDir}/*beforemigration*)"
+    fi
+ 
+        ${BLUE_LINE}
+
+    echo -e "${GREEN}Step:4 Stopping channels${NC}"
+    counter=4
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "Channels are already stopped on ${qmgr}"
+    else
+        /opt/mw/mqm/bin/mqstopchannels.sh ${qmgr} ALL
+        check_rc $? "Channels are stopped successfully on ${qmgr}.." "Exiting the program as the CHANNELS are NOT stopped on ${qmgr}.." "${counter}" "${qmgr}"
+    fi
+
+        ${BLUE_LINE}
+
+    echo -e "${GREEN}Step:5 Changing the Qmgr LISTENER to MANUAL${NC}"
+    counter=5
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "Qmgr LISTENER is already changed to MANUAL"
+    else
+        alterQmgrListenerControlManual ${qmgr}
+        check_rc $? "LISTENER for the ${qmgr} is set to MANUAL.." "Exiting the program as the LISTENER is not set to MANUAL on ${qmgr}.." "${counter}" "${qmgr}"
+    fi
+  done
+
+        ${BLUE_LINE}
+
+   backup_qmgrs # Backing up Qmgrs
+ 
+        ${BLUE_LINE}
+
+   echo -e "${GREEN}Waiting for 5 seconds before proceeding with the migration${NC}"
+   sleep 5
+ 
+        ${BLUE_LINE}
+
+    echo -e "${GREEN}Step:8 Migrating Qmgrs on server $(hostname) from MQv9 to MQ9.1${NC}"
+    for qmgr in $qmgrs
     do
-      if [ $(lsvg -l  $VolGr | grep ${qmgr} | wc -l ) -ne 0 ] ; then
-         if [ $( lsvg  -o  |  grep $VolGr | wc -l ) -ne 1 ] ; then
-            p_warning "The volumegroup  ${VolGr}         is not active   !!!"
-            p_warning "The queue manager $bold${qmgr}$off is not running on this node !!!"
-            if [[ $q_rc -lt 2 ]];then
-               q_rc=2
-            fi
-            return $q_rc
-         else
-            QmgrAktiv="Y"
-         fi
-      else
-         if [ $(lsvg -l  $VolGr | grep /MQHA | wc -l ) -ne 0 ] ; then
-            if [ -d ${MQ_DATA}/${qmgr} ]; then
-               QmgrAktiv="Y"
-            fi
-         fi
-      fi
+        counter=8
+        if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+            echo "${qmgr} is already migrated to MQv9.1"
+        else
+            migratingQmgr ${qmgr}    
+            check_rc $? "Migrated the ${qmgr} successfully to MQv9.1" "Exiting the script as migration is not successful for ${qmgr}, please check" "${counter}" "${qmgr}"
+        fi
+    done
+ 
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Verifing the ${qmgr} installation${NC}"
+    echo "$(dspmq -o installation)"
+       
+        ${BLUE_LINE}
+
+    echo -e "${GREEN} Make the MQv9.1 InstallationName as Primary Installation${NC}"
+    echo -e "${GREEN}Step:9 Unset the Primary installation from /opt/mqm900${NC}"
+    for qmgr in ${qmgrs};
+    do
+        counter=9
+        if [[ -f ${backupDir}/${qmgr}_9.txt ]]; then
+            echo "MQv9 is already unset as Primary Installation on ${qmgr}"
+        else
+            echo "$(/opt/mqm900/bin/setmqinst -x -p /opt/mqm900)"
+            check_rc $? "Proceed with setting MQv9.1 as Primary Installation on ${qmgr}" "Program is exiting due to the failure of unsetting the MQv9 as Primary installation on ${qmgr}... Please check errors and re-run the script again" "${counter}" "${qmgr}"
+        fi
+   
+    echo -e "${GREEN}Step:10 Set the Primary installation to /opt/mqm910${NC}"
+    counter=10
+    if [[ -f ${backupDir}/${qmgr}_10.txt ]]; then
+        echo "MQv9.1 is already set as Primary Installation on ${qmgr}"
+    else
+        echo "$(/opt/mqm900/bin/setmqinst -i -p /opt/mqm910)"
+        check_rc $? "MQ9.1 is set as Primary Installation on ${qmgr}" "Program is getting exit due to failure of setting MQv9.1 as Primary Installation on ${qmgr}. Please check errors and re run the script again" "${counter}" "${qmgr}"
+    fi
+   
     done
 
-    if [ "$QmgrAktiv" = "N" ]
-    then
-       p_warning "The volumegroup  ${VolGr}         is not active   !!!"
-       p_warning "The queue manager $bold${qmgr}$off is not running on this node !!!"
-       if [[ $q_rc -lt 2 ]];then
-           q_rc=2
-       fi
-       return $q_rc
-    fi
-    ;;
- "Linux")
-    if [ ! -d ${MQ_DATA}/${qmgr} ] ; then
-       p_warning "The queue manager $bold${qmgr}$off is not running on this node !!!"
-       if [[ $q_rc -lt 2 ]];then
-           q_rc=2
-       fi
-       return $q_rc
-    fi
-    ;;
-*)
-    ;;
-esac
-
-
-   #echo $cls$off
-	vers=$(do_as_mqm ${qmgr} "${MQ_HOME}/bin/dspmqver -f 2")
-    p_info "MQSeries $vers "
-	p_info "Queue Manager:     ${bold}${qmgr}${off}"
-    MQSTATUS=""
-    typeset -u MQSTATUS=`do_as_mqm ${qmgr} "${MQ_HOME}/bin/dspmq -m ${qmgr}" | awk ' /STATUS/ { string = substr($2, 8,7) ; print string } ' `
-    p_info "$(printf "%-35s %s" 'Queuemanager status:' $MQSTATUS)"
-
-   
-   if [ $mqversion -ge 800 ] ; then
-      #  MQ 8 and higher -->  MQ8_processes='amqzxma0|amqzmuc0|amqzmur0|amqrrmfa'
-      ANZPROC1=4
-      ANZPROC=`$PS $PSPARM|$GREP -v grep|$EGREP -e 'amqzxma0|amqzmuc0|amqzmur0|amqrrmfa' | grep -wc ${qmgr}`
-   else
-      #  MQ 7 --> MQ7_processes='amqzxma0|amqzmuc0|amqzmur0|amqzdmaa|amqrrmfa'
-      ANZPROC1=5
-      ANZPROC=`$PS $PSPARM|$GREP -v grep|$EGREP -e 'amqzxma0|amqzmuc0|amqzmur0|amqzdmaa|amqrrmfa' | grep -wc ${qmgr}`
-   fi
-   
-  
-	# check qmgr processes
-	
-	if [ $ANZPROC -ne $ANZPROC1 ] ; then
-		p_error "$(printf "%-35s %s" 'necessary qmgr processes' 'NOT RUNNING')"
-		q_rc=3
-	else
-		p_info "$(printf "%-35s %s" 'necessary qmgr processes' 'RUNNING')"
-	
-		if [ $($PS $PSPARM | grep -v grep | grep amqpcsea | grep ${qmgr} | wc -l ) -ne 1 ] ; then
-	    	p_error "$(printf "%-35s %s" Commandserver:  'NOT RUNNING')"
-	    	q_rc=3
-		else
-	    	p_info "$(printf "%-35s %s" Commandserver:  'RUNNING')"
-		fi
-	
-		if [ $($PS $PSPARM | grep -v grep | grep runmqchi | grep ${qmgr} | wc -l ) -ne 1 ] ; then
-	    	p_error "$(printf "%-35s %s" Channelinitiator:  'NOT RUNNING')"
-	    	if [[ $q_rc -lt 2 ]];then
-	           q_rc=2
-	    	fi
-		else
-	    	p_info "$(printf "%-35s %s" Channelinitiator:  'RUNNING')"
-		fi
-	
-	      p_info "Checking Listener "
-	      OBJECT="LISTENER.*"
-	      OBJCLASS=LSSTATUS
-	      FILTER1=LISTENER
-	      FILTER2="STATUS(RUNNING)"
-	      OBJCLASS1=LISTENER
-	      FILTER11=LISTENER
-	      FILTER12="CONTROL(QMGR)"
-	      chk_service $OBJCLASS $FILTER1 $FILTER2 $OBJECT $OBJCLASS1 $FILTER11 $FILTER12
-	
-	      p_info "Check Trigger"
-	      OBJCLASS=SVSTATUS
-	      FILTER1=TRIGGER
-	      FILTER2="STATUS(RUNNING)"
-	      OBJECT="TRIGGER.*"
-	      OBJCLASS1=SERVICE
-	      FILTER11=TRIGGER
-	      FILTER12="CONTROL(QMGR)"
-	      chk_service $OBJCLASS $FILTER1 $FILTER2 $OBJECT $OBJCLASS1 $FILTER11 $FILTER12
-
-mqxrcount=`rpm -qa | grep MQSeriesXRService | wc -l`
-if [[ $mqxrcount -ge 1 ]];then
-
-	      p_info "Check MQXR Service "
-          OBJCLASS=SVSTATUS
-          FILTER1=MQXR
-          FILTER2="STATUS(RUNNING)"
-          OBJECT="SYSTEM.MQXR.*"
-          OBJCLASS1=SERVICE
-          FILTER11=MQXR
-          FILTER12="CONTROL(QMGR)"
-          chk_service $OBJCLASS $FILTER1 $FILTER2 $OBJECT $OBJCLASS1 $FILTER11 $FILTER12
-fi
-
-fi  # end of else part of if [ $ANZPROC -ne $ANZPROC1 ]
-
-
-p_info "Checking MQ-Agents"
-  for MQ_AGENT in mqagentadmin mqagentmonitor
-  do
-   if [ -f ${MQTOOLS_HOME}/bin/${MQ_AGENT} ]; then
-if [ "$($PS ${PSPARM} | grep -v grep | grep -c "${MQ_AGENT} -qmgr ${qmgr}")" -ne "1" ]
-      then
-         p_error "$(printf "%-35s %s" ${MQ_AGENT}: 'NOT RUNNING')"
-         q_rc=3
-      else
-         p_info "$(printf "%-35s %s" ${MQ_AGENT}: 'RUNNING')"
-      fi
-   else
-         p_error "There is no ${MQ_AGENT} installed on this server !!!"
-         q_rc=3
-   fi
-  done
-  
-# call put/get check
-put_get
-
-# check FS and env
-check_fs_and_env
-
-####new
-#ignore the check as the initial log backup is not taken anymore
-#filename=${MW_BACKUP_DIR}/${myHostname}-${qmgr}-initial-logs.tar.gz
-#if [ ! -f ${filename} ]; then
-#        p_warning "Initial log backup files not found for QMGR: ${qmgr}"
-#        if [[ $q_rc -lt 2 ]];then
-#                q_rc=2
-#        fi
-#else
-#        p_info "Initial log backup files found for QMGR: ${qmgr}"
-#fi
-
-filename=${MW_BACKUP_DIR}/${myHostname}-${qmgr}-initial-data.tar.gz
-if [ ! -f ${filename} ]; then
-        p_warning "Initial data backup files not found for QMGR: ${qmgr}"
-        if [[ $q_rc -lt 2 ]];then
-                q_rc=2
+    InstVer=$(dspmqver -i | grep -e "Version\|Primary")
+    echo "$InstVer"
+ 
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Adding MSGSEVERITY & JSON properties to the qmgr locals file ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        echo -e "${GREEN}Step:11 Adding MSGSEVERITY property to Qmgr locals file ${NC}"
+        counter=11
+        if [[ -f ${backupDir}/${qmgr}_11.txt ]]; then
+            echo "MSGSEVERITY property is already added in the  locals file of ${qmgr}"
+        else
+            Update_config  "/etc/mw/mqm/locals_${qmgr}" "MSGSEVERITY=NO"
+            [[ "$(cat /etc/mw/mqm/locals_${qmgr}| grep MSGSEVERITY | wc -l)" -eq 1 ]]
+            check_rc $? "MSGSEVERITY property is added to the locals_${qmgr} file" "Program is getting exit due to failure of adding MSGSEVERITY properties on ${qmgr}... Please check errors and re-run the script again" "${counter}" "${qmgr}"
         fi
-else
-        p_info "Initial data backup files found for QMGR: ${qmgr}"
-fi
+   
+    echo -e "${GREEN}Step:12 Adding JSON property to Qmgr locals file ${NC}"
+    counter=12
+    if [[ -f ${backupDir}/${qmgr}_12.txt ]]; then
+        echo "JSON property is already added in the locals file of ${qmgr}"
+    else
+        Update_config  "/etc/mw/mqm/locals_${qmgr}" "JSON=YES"
+        [[ "$(grep JSON /etc/mw/mqm/locals_${qmgr}| wc -l)" -eq 1 ]]
+        check_rc $? "JSON property is added to the locals_${qmgr} file" "Program is getting exit due to failure of adding JSON properties on ${qmgr}... Please check errors and re run  the script again" "${counter}" "${qmgr}"
+    fi
+    done
+ 
+        ${BLUE_LINE}
 
-#####
+    echo -e "${GREEN}Step:13 Adding LogManagement entry in qm.ini ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=13
+        if [[ "$(grep 'LogManagement=' /var/mqm/qmgrs/${qmgr}/qm.ini |wc -l)" -eq 1 ]]; then
+            echo "Already LogManagement Entry is added to the qm.ini file of ${qmgr}"
+        else
+            logcleanup=$(grep "LOGCLEANUP=archive" /etc/mw/mqm/locals_${qmgr} | wc -l)
+            if [[ "$(grep "LOGCLEANUP=archive" /etc/mw/mqm/locals_${qmgr} | wc -l)" -eq 1 ]]; then
+                sed -i '/LogWriteIntegrity=.*/a LogManagement=Archive' /var/mqm/qmgrs/${qmgr}/qm.ini
+                sed -i 's/LogManagement=Archive/   LogManagement=Archive/g' /var/mqm/qmgrs/${qmgr}/qm.ini
+                logmanagement=$(grep 'LogManagement=Archive' /var/mqm/qmgrs/${qmgr}/qm.ini| wc -l)
+                [[ "$logmanagement" -eq 1 ]]
+                check_rc $? "LogManagement is set as Archive in qm.ini file of ${qmgr}" "LogManagement is not set as Archive in ${qmgr} qm.ini file of ${qmgr}" "${counter}" "${qmgr}"
+            else
+                sed -i '/LogWriteIntegrity=.*/a LogManagement=Automatic' /var/mqm/qmgrs/${qmgr}/qm.ini
+                sed -i 's/LogManagement=Automatic/   LogManagement=Automatic/g' /var/mqm/qmgrs/${qmgr}/qm.ini
+                logmanagement=$(grep 'LogManagement=Automatic' /var/mqm/qmgrs/${qmgr}/qm.ini| wc -l)
+                [[ "$logmanagement" -eq 1 ]]
+                check_rc $? "LogManagement is set as Automatic in qm.ini file of ${qmgr}" "LogManagement is not set as Automatic in ${qmgr} qm.ini file of ${qmgr}" "${counter}" "${qmgr}"
+            fi
+        fi
+    done
 
-# check variable LD_LIBRARY_PATH in mqinclude.sh 
-chk_variable_LD_LIBRARY_PATH
+        ${BLUE_LINE}
 
-if [ "$q_rc" -ne "0" ] ; then 
-     p_info "Returncode for ${qmgr} = $q_rc"
-    if [[ "$g_rc" -lt "$q_rc" ]];then
-         g_rc=$q_rc
-     fi
-fi
- return ${rc}
+    echo -e "${GREEN}Step:14 Adding ChlauthEarlyAdopt stanza in qm.ini ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=14
+        if [[ "$(grep 'ChlauthEarlyAdopt=' /var/mqm/qmgrs/${qmgr}/qm.ini |wc -l)" -eq 1 ]]; then
+            echo "Already ChlauthEarlyAdopt stanza is added to the qm.ini file of ${qmgr}"
+        else
+            sed -i '/AdoptNewMCACheck=.*/a ChlauthEarlyAdopt=Y' /var/mqm/qmgrs/${qmgr}/qm.ini
+            sed -i 's/ChlauthEarlyAdopt=Y/   ChlauthEarlyAdopt=Y/g' /var/mqm/qmgrs/${qmgr}/qm.ini
+            chlauthearlyadopt=$(grep 'ChlauthEarlyAdopt=Y' /var/mqm/qmgrs/${qmgr}/qm.ini| wc -l)
+            [[ "${chlauthearlyadopt}" -eq 1 ]]
+            check_rc $? "ChlauthEarlyAdopt stanza is added to qm.ini file of ${qmgr}" "ChlauthEarlyAdopt stanza is not added to qm.ini file of ${qmgr}" "${counter}" "${qmgr}"
+        fi
+    done
+
+        ${BLUE_LINE}
+
+    echo -e "${GREEN}Step:15 Starting all the Qmgrs ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=15
+        if [[ -f ${backupDir}/${qmgr}_15.txt ]]; then
+            echo "This action is already taken care"
+        else
+            mqstartQmgr ${qmgr}
+            check_rc $? "${qmgr} is in Running state... Please proceed with the furhter steps" "{$qmgr} is not in running state, reatart the qmgrs again" "${counter}" "${qmgr}"
+        fi
+    done
+ 
+
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN} Change Qmgr property to schedule the media image backup automatic once in 24 hours ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        echo -e "${GREEN}Step:16 Altering IMGSCHED to AUTO ${NC}"
+        counter=16
+        if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+            echo "IMGSCHED of the ${qmgr} is already to set to AUTO"
+        else
+            alterQmgrImgschedtoAUTO ${qmgr}
+            check_rc $? "IMGSCHED is set to AUTO on ${qmgr}... proceed with changing the IMGINTVL" "Exiting the program as IMGSCHED is not set to AUTO on ${qmgr}.. Please verify" "${counter}" "${qmgr}"
+        fi
+
+        ${BLUE_LINE}
+   
+    echo -e "${GREEN}Step:17 Altering IMGINTVL to 24 Hrs ${NC}"
+    counter=17
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "IMGINTVL of the ${qmgr} is already set to 24 hours"
+    else
+        alterQmgrImgIntvlto1440 ${qmgr}
+        check_rc $? "IMGINTVL is set to 24 hours on ${qmgr}. Proceed further" "Exiting the program as IMGINTVL is not set to 24 hours on ${qmgr}. Please verify" "${counter}" "${qmgr}"
+    fi
+       
+    echo -e "${GREEN}Step:18 Altering ADOPTCTX value of IDPWLDAP to YES ${NC}"
+    counter=18
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "ADOPTCTX value of IDPWLDAP is already set to YES"
+    else
+        alterauthinfoLDAPtoYes ${qmgr}
+        check_rc $? "ADOPTCTX value for SYSTEM.DEFAULT.AUTHINFO.IDPWLDAP is set to YES" "ADOPTCTX value for SYSTEM.DEFAULT.AUTHINFO.IDPWLDAP is not set to YES, please re-run the script" "${counter}" "${qmgr}"
+
+    fi    
+        ${BLUE_LINE}
+    echo -e "${GREEN}Step:19 Altering ADOPTCTX value of IDPWOS to YESY ${NC}"
+    counter=19
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "ADOPTCTX value of IDPWOS is already set to YES"
+    else
+        alterauthinfoOStoYes ${qmgr}
+        check_rc $? "ADOPTCTX value for SYSTEM.DEFAULT.AUTHINFO.IDPWOS is set to YES" "ADOPTCTX value for SYSTEM.DEFAULT.AUTHINFO.IDPWOS is not set to YES, please re-run the script" "${counter}" "${qmgr}"
+
+    fi
+    done
+ 
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Step:20 Change the Control of the LISTENER to QMGR ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=20
+        if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+            echo "${qmgr} LISTENER Control is already set to QMGR"
+        else
+            alterListenerControltoQMGR ${qmgr}
+            check_rc $? "LISTENER is set to QMGR on ${qmgr}." "Exiting program as the LISTENER is not set to QMGR on ${qmgr},if this operation fails for the second time, then go with the ROllback decision" "${counter}" "${qmgr}"
+        ${BLUE_LINE}
+        fi
+    done
+ 
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Step:21 CONTROL of SYSTEM.AMQP.SERVICE should be MANUAL ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=21
+        if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+            echo "CONTROL of AMQP service is already checked in ${qmgr}"
+        else
+            echo  'dis service(SYSTEM.AMQP.SERVICE) control' | su - mqm -c ". mqsetenv ${qmgr} ; runmqsc ${qmgr}"
+        ${BLUE_LINE}
+            check_rc $? "CONTROL of AMQP service is set to MANUAL on ${qmgr}" "CONTROL of AMQP service not yet set to MANUAL on ${qmgr}" "${counter}" "${qmgr}"
+        fi
+    done
+ 
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Step:22 Verify JSON files generated under /var/mqm/errors & Qmgr error logs ${NC}"
+    [[ $( ls  /var/mqm/errors/*json | wc -l) -eq 3 ]]
+    check_rc $? "3 JSON files are available under /var/mqm/errors" "3 JSON files are not available under /var/mqm/errors"
+ 
+ 
+    for qmgr in ${qmgrs}
+    do
+        [[ $(ls  /var/mqm/qmgrs/${qmgr}/errors/*.json | wc -l) -eq 3 ]]
+        check_rc $? "3 JSON files are available under /var/mqm/qmgrs/${qmgr}/errors/*.json on ${qmgr}" "3 JSON files are not available under /var/mqm/qmgrs/${qmgr}/errors/*.json on ${qmgr}"
+    done
+       
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Restart the Queue Manager on $(hostname) ${NC}"
+    echo -e "${GREEN}Step:23 Stopping the qmgr/qmgrs ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=23
+        if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+            echo "${qmgr} is already in stopped state"
+        else
+            mqstopQmgr ${qmgr}
+            check_rc $? "${qmgr} is in stopped state" "Exiting the program as the ${qmgr} is not in stopped state" "${counter}" "${qmgr}"
+        fi
+
+    echo -e "${GREEN}Step:24 Starting the qmgr/qmgrs ${NC}"
+    counter=24
+    if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+        echo "this action is already taken"
+    else
+        mqstartQmgr ${qmgr}
+        check_rc $? "${qmgr} is in running state... Proceeding with the next step" "Exiting the program as the ${qmgr} is not in Running state" "${counter}" "${qmgr}"
+    fi
+   
+        ${BLUE_LINE}
+   
+    done
+ 
+        ${BLUE_LINE}
+ 
+    echo -e "${GREEN}Step:25 Performing Channel & Queue Status Checks ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        counter=25
+        if [[ -f ${backupDir}/${qmgr}_${counter}.txt ]]; then
+            echo "Channel and Queue Status checks are already performed"
+        else
+            channels_queues_status_check_aftermigration ${qmgr}  
+            check_rc $? "Channel & Queue status files for ${qmgr} is available under ${backupDir}" "Exiting the program as the Channel & Queue Staus Check files for ${qmgr} is not available.. Please check" "${counter}" "${qmgr}"
+        echo "$(ls -ltr ${backupDir}/*aftermigration* )"
+        diff /var/mw/mqbackup/migration910/${qmgr}_*_retrying_chstatus_beforemigrtion.log /var/mw/mqbackup/migration910/${qmgr}_*_retrying_chstatus_aftermigration.log
+        echo "if you notice any channels other than in Running state after the migration, please investigate"
+        fi
+    done
+
+        ${BLUE_LINE}
+
+    echo -e "${GREEN}Step:26 Stopping the qmgr/qmgrs ${NC}"
+    for qmgr in ${qmgrs}
+    do
+        /opt/mw/mqm/bin/mqstop.sh -all
+        sleep 10
+      #  [[ "$(ps -ef | grep ${qmgr} |grep -v grep | wc -l)" -eq 0 ]]
+        check_rc $? "Qmgr/qmgrs are in stopped state.Proceed in rebooting the server." "Exiting the program as the qmgrs are not in stopped state" "${counter}" "${qmgr}"
+    done
+
 }
-## end Invoke()
 
-##
-## Main
-###################################################################
+echo "Time taken for MQv9.1 Migration is $SECONDS"
+# End of migration function
 
-# call the common routine for all queue managers
-g_rc=0
- . ${HOME}/mqinvokeforqmgrs.sh
-if [[ $g_rc -lt $q_rc ]];then
-        p_info_ts "Returncode for all = $g_rc"
-     fi
-return $g_rc
+echo -e "${GREEN}Check  MQ9.1 is installed ${NC}"
+mqversion=$(dspmqver -i | grep '9.1.' | grep -i Version | awk -F':' '{printf $2}')
+if [ ! -z $mqversion ]; then
+    migrating_qmgrs
+else
+    RC=$(( RC + $? ))
+    printError "Exiting the program as the MQv9.1 is not installed... Please execute the script mq91install.sh in bu-master to install MQv9.1 "
+    echo RC=${RC}
+    exit $RC
+fi
