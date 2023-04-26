@@ -1,4 +1,3 @@
-
 #!/usr/bin/ksh
  #
  #       mqsslsetup.sh: Anlegen und Handling von SSL Zertifikaten eines Queue Managers 
