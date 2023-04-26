@@ -1,17 +1,11 @@
-#!/usr/bin/ksh
+#!/bin/ksh
 ##############################################################################
 #
-# Script:          mqstart.sh
+# Script:         mqstartchannels.sh
 #
-# Usage:          
+# Usage:          mqstartchannels.sh <qmgr> <chltype> | <ALL filename>
 #
-# Description:     start qmgr
-#                  
-#                  
-#
-#                  
-#                  
-#
+# Description:    start channels
 #                     
 #
 # Remarks:         
@@ -20,213 +14,137 @@
 #                  
 #                  
 #
-# History:         2012-08-04   fdressle     initial version
-#                  2013-09-23   lreckru      change echo to p_info, add 2>&1 
-#                                            to command amqiclen and strmqm
-#				   2014-11-24   lreckru		 move amqiclen on the begin of script, 
-#                                            add output of ntpq -p view return of strmqm
-#				   2014-11-27	sanzmaj	     multiversion
-#								phutzel	     checks
+# History:         2013-03-02   lreckru     add channel list in file as parameter
+#                                           each line must be like "CHANNEL(name)"
+#                                           ever exclude SYSTEM.* Objects
+#				   2014-11-27	sanzmaj	    multiversion
+#								phutzel	    checks
+#
 ##############################################################################
+#
 #set -x
-
+#
 
 # get full path to this script
 HOME=`readlink -f $0`
 HOME=`dirname $HOME`
-#new
-export SCRIPT_NAME=$(basename $0)
-
-WAITTIME=5
 
 # call the common include
 . ${HOME}/mqinclude.sh
 
-function start_mqs
-{
-        QMGR=$1
-        rc=0
-        [[ "$PLATFORM" = "AIX" ]] && export EXTSHM=ON
-        
-        count=0
-        i=0
-        # check if any mq processes are running
-        srchstr="( |-m)$QMGR *.*$"
-        for process in amqzmuc0 amqzxma0 amqpcsea amqzlaa0 amqzfuma amqzmur0 runmqlsr amqzmgr0
-        do
-            count=`ps -efww | tr "\t" " " | grep $process | grep -v grep | \
-            egrep "$srchstr" | awk '{print $2}'| wc -l`
-            if [[ $count -gt 0 ]]
-            then
-                processes="$processes\n   $process"
-                i=1                    
-            fi
-        done
-            
-        if [[ $i -eq 0 ]]; then
-#clear ipc resources 
-#          if [[ -x ${MQ_HOME}/bin/amqiclen ]]; then
-#            p_info "Clear all IPC resources"
-#            do_as_mqm ${QMGR} "${MQ_HOME}/bin/amqiclen -x -m $QMGR 2>&1"
-#          fi
+if [ $# -lt 2 ] ; then
+  echo "Usage : $0 <qmgr> <chltype>"
+  echo "No Queue Manager name or channel type supplied"
+  echo "You must supply a Queue Manager name and a channel type" 
+  echo "ALL | SDR | SVR | RCVR | RQSTR | CLNTCONN | SVRCONN | CLUSSDR | CLUSRCVR  "
+  echo "for the channel type ALL you must also supply a filename  (with a list of channel names)"
+  echo "each line like 'CHANNEL(XXXXXXX.XXXXXXX.XX)' "
+  echo "Use the command dspmq to see the list of installed Queue Managers"
+  echo "Exiting ..."
+  exit 1
+fi
 
-          if [[ -x "${MQ_HOME}/bin/strmqm" ]]; then
-#                        exports="export AMQ_BAD_COMMS_DATA_FDCS=TRUE; export AMQ_ADDITIONAL_JSON_LOG=1;"
-			echo "Message SEverity:" ${MSGSEVERITY}
-                        exports="export AMQ_BAD_COMMS_DATA_FDCS=TRUE;"
-			mqversion=$(dspmq -o inst | grep ${QMGR} | awk -F " " '{print $4}' | sed 's/)/(/g' | awk -F "(" '{print $2}' | awk -F "." '{print $1$2$3}')
-			if [[ ${mqversion} -ge "910" ]]
-            		then
-                                if [[ "YES" = "${MSGSEVERITY}" ]];then
-                                        exports="$exports export AMQ_DIAGNOSTIC_MSG_SEVERITY=1;"
-                    else
-                                        exports="$exports export AMQ_DIAGNOSTIC_MSG_SEVERITY=0;"
-                                fi
-                                if [[ "YES" = "${JSON}" ]]; then
-                                        exports="$exports export AMQ_ADDITIONAL_JSON_LOG=1;"
-                                fi
-            fi
-			
-#Expiring global units of work
-                        AMQ_TRANSACTION_EXPIRY_RESCAN=${AMQ_TRANSACTION_EXPIRY_RESCAN:-$DEF_AMQ_TRANSACTION_EXPIRY_RESCAN}
-                        AMQ_XA_TRANSACTION_EXPIRY=${AMQ_XA_TRANSACTION_EXPIRY:-$DEF_AMQ_XA_TRANSACTION_EXPIRY}
+qmgr=$1
+CHT=$2
 
- # 0 means off , convert minutes in milliseconds
-                        if [[ ${AMQ_TRANSACTION_EXPIRY_RESCAN} -gt 0 ]] ; then
+# Checks and set multi-version vars
+mqsetenv -m $qmgr
 
-                                AMQ_TRANSACTION_EXPIRY_RESCAN=$(expr ${AMQ_TRANSACTION_EXPIRY_RESCAN} \* 60000)
-                                p_info "Setting AMQ_TRANSACTION_EXPIRY_RESCAN=${AMQ_TRANSACTION_EXPIRY_RESCAN}"
-                                exports="$exports export AMQ_TRANSACTION_EXPIRY_RESCAN=${AMQ_TRANSACTION_EXPIRY_RESCAN};"
-                        else
-                                p_info "Disable AMQ_TRANSACTION_EXPIRY_RESCAN"
-                        fi
-                        if [[ ${AMQ_XA_TRANSACTION_EXPIRY} -gt 0 ]] ; then
-                                AMQ_XA_TRANSACTION_EXPIRY=$(expr ${AMQ_XA_TRANSACTION_EXPIRY} \* 60000)
-                                p_info "Setting AMQ_XA_TRANSACTION_EXPIRY=${AMQ_XA_TRANSACTION_EXPIRY}"
-                                exports="$exports export AMQ_XA_TRANSACTION_EXPIRY=${AMQ_XA_TRANSACTION_EXPIRY};"
-                        else
-                                p_info "Disable AMQ_XA_TRANSACTION_EXPIRY"
-                        fi
+if [ "${CHT}" = "ALL" ];then
+   Obj_Listfile=$3
+   extstr="from file $Obj_Listfile"
+   if [ ! -f ${Obj_Listfile} ] ; then
+      echo "Can't find channel list file ${Obj_Listfile} "
+      exit 2
+   fi
+fi
 
-            # Start MQSeries Queue-Manager
-            p_info "Start queuemanager ${QMGR}"
-            echo $exports
-        	do_as_mqm ${QMGR} "$exports ${MQ_HOME}/bin/strmqm $QMGR 2>&1|sed 's/^/          /'" # su mqm -c (without - ; to preserver environment )
-			erg=$?
-			case ${erg} in
-				0)   msg="Queue manager started (MQCC_OK)";;
-				1)   msg="Warning partial completion (MQCC_WARNING)";;
-				2)   msg="Call failed (MQCC_FAILED)";;
-				3)   msg="Queue manager being created";;
-				5)   msg="Queue manager running";;
-				16)  msg="Queue manager does not exist";;
-				23)  msg="Log not available";;
-				24)  msg="A process that was using the previous instance of the queue manager has not yet disconnected.";;
-				30)  msg="A standby instance of the queue manager started. The active instance is running elsewhere";;
-				31)  msg="The queue manager already has an active instance. The queue manager permits standby instances.";;
-				39)  msg="Invalid parameter specified";;
-				43)  msg="The queue manager already has an active instance. The queue manager does not permit standby instances.";;
-				47)  msg="The queue manager already has the maximum number of standby instances";;
-				49)  msg="Queue manager stopping";;
-				58)  msg="Inconsistent use of installations detected";;
-				62)  msg="The queue manager is associated with a different installation";;
-				69)  msg="Storage not available";;
-				71)  msg="Unexpected error";;
-				72)  msg="Queue manager name error";;
-				74)  msg="The WebSphere MQ service is not started.";;
-				91)  msg="The command level is outside the range of acceptable values.";;
-				92)  msg="The queue manager's command level is greater or equal to the specified value.";;
-				100) msg="Log location invalid";;
-				119) msg="User not authorized to start the queue manager";;
-				*)   msg="unknown return code";;
-			esac
-			case ${erg} in
-				0|3|5)  msg=""
-				        p_info_ts "wait ${WAITTIME} sec to check ${QMGR}"
-				        sleep ${WAITTIME}
-				        if [[ $(dspmq -m $QMGR | grep "STATUS(Running)"| wc -l) -eq 1 ]]; then 
-               				p_info_ts "Status Qmgr $QMGR : STATUS(Running)"
-               			else
-#               			    call_logger CRONMON 2 "second time mqstart $QMGR"
-#new
-                                call_logger CRONMON 2 ${SCRIPT_NAME} "second time mqstart $QMGR"
-               			    p_info_ts "2. Start queuemanager ${QMGR}"
-            				do_as_mqm ${QMGR} "$exports ${MQ_HOME}/bin/strmqm $QMGR 2>&1|sed 's/^/          /'" # su mqm -c (without - ; to preserver environment )
-							erg=$?
-               			    rc=$erg
-               			fi
-              			;;
-				*)  	 call_logger CRONMON 3 ${SCRIPT_NAME} "mqstart $QMGR $msg"
-#				call_logger CRONMON 3 "mqstart $QMGR : $msg"
-				    	rc=$erg
-				    	p_error_ts "Return code strmqm : $erg : $msg";;
-			esac
-          fi
-        else
-		   p_warning_ts "Exisiting WMQ-process(es) for $QMGR found: $processes"
-#          echo "$MQSCRIPT : Warning ! Exisiting WMQ-process(es) for $QMGR found: $processes"
-          rc=2
-        fi
-}
+echo "Working with Queue Manager : ${qmgr} and channel type : $CHT $extstr" 
+echo "Excluding channels with 'SYSTEM.*' in the name "
 
-function start_broker
-{
-  qmgrName=$1
-        
-  # call the IIB Tools script to start an Integration Node by the name of its Queue Manager
-  iibstartnode -qmgr $qmgrName
-}
+platform=`uname`
 
-function invoke {
-   QMGR=$1
-   MODE=$2
-   rc=0
-   
-   if [[ "SINGLE" = "${MODE}" || "YES" = "${STRTWMQ}" ]];then
-      p_info_ts "Starting queuemanager ${QMGR}"
-      start_mqs ${QMGR}      
-      
-      if [[ "YES" = "${STRTBRK}" ]]
-      then
-         p_info_ts "Starting broker ${QMGR}"
-         start_broker ${QMGR}    
-      fi    
-
-      p_info_ts "Summary RC for ${QMGR} $rc"
-      
-   else
-      p_info_ts "Skip start of queuemanager ${QMGR} by config"
-#      echo "Skip start of queuemanager ${QMGR} by config"
-   fi 
-}
-
-
-# called befor do all other 
-function invokestartup {
-	# get time sync status
-	p_info "\n$(echo "q"|ntpq -p)"
-	
-	i=0
-	# check if any mq processes are running
-	for process in amqzmuc0 amqzxma0 amqpcsea amqzlaa0 amqzfuma amqzmur0 runmqlsr amqzmgr0
-	do
-	    count=`ps -efww | tr "\t" " " | grep $process | grep -v grep | awk '{print $2}'| wc -l`
-	    if [[ $count -gt 0 ]]
-	    then
-	        i=1                    
-	    fi
-	done
-	    
-	if [[ $i -eq 0 ]]; then
-	# clear all ipc resources
-	  if [[ -x ${MQ_HOME}/bin/amqiclen ]]; then
-	    p_info_ts "Clear all MQ-IPC resources"
-	    ${su_cmd_pre}"${MQ_HOME}/bin/amqiclen -x 2>&1"
-	  fi
+if [ "${migrationDir}" = "" ]; then
+	if [ $platform = 'CYGWIN_NT-5.1' ]; then
+      migrationDir=`dirname $0`/../migration
+	else
+      migrationDir=/var/mw/mqbackup
 	fi
-}
+fi
 
-###############################################################################
-# call the common routine for all queue managers
-. ${HOME}/mqinvokeforqmgrs.sh
+echo "Use migration directory ${migrationDir}"
 
+# ensure we have a migration directory
+if [ ! -d $migrationDir ];then
+	mkdir $migrationDir
+fi
+
+# ensure we have a directory per queue manager
+if [ ! -d ${migrationDir}/${qmgr} ]; then
+   mkdir ${migrationDir}/${qmgr}
+fi
+
+if [ -f ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt ]; then 
+   rm ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt 
+fi 
+if [ -f ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log ]; then
+   echo "" > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+else
+   touch ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+fi
+# start selected channels
+HOST=`hostname`
+TS=`date +%Y-%m-%d_%H:%M:%S`
+echo "$TS - starting $CHT channels $extstr for Queue Manager: ${qmgr} on host : $HOST" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+
+
+if [ "${CHT}" = "ALL" ];then 
+	echo "dis channel(*) " | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr} 2>/dev/null  " > /tmp/${qmgr}_"$CHT"_dis_channel_sta.txt
+	dis_channel_rc=$?
+	if [ $dis_channel_rc != 0 ]; then
+		echo " dis channel return code is : $dis_channel_rc ; exiting"
+		exit $dis_channel_rc
+	fi 
+else
+	echo "dis channel(*) WHERE ( chltype EQ $CHT )" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/${qmgr}_"$CHT"_dis_channel_sta.txt
+	dis_channel_rc=$?
+	if [ $dis_channel_rc != 0 ]; then
+		echo " dis channel return code is : $dis_channel_rc ; exiting"
+		exit $dis_channel_rc
+	fi 
+	grep CHANNEL /tmp/${qmgr}_"$CHT"_dis_channel_sta.txt | grep -v SYSTEM. | awk ' { print $1 } ' > ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt
+   Obj_Listfile=${migrationDir}/${qmgr}/"$CHT"_start_channel.txt
+fi
+
+if [ ! -f "${Obj_Listfile}" ] ; then
+   echo "Object list file not readable"
+else
+   cat ${Obj_Listfile} | while read line
+   do
+
+      echo "starting : $line" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+      echo "start $line " | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/"${qmgr}"_"$CHT"_start_channel.txt 
+      sta_channel_rc=$?
+      amqerr=`grep AMQ /tmp/"${qmgr}"_"$CHT"_start_channel.txt`
+      grep -E "AMQ9533|AMQ9531" /tmp/"${qmgr}"_"$CHT"_start_channel.txt > /dev/null
+      ret_grep=$?
+              
+      cat /tmp/"${qmgr}"_"$CHT"_start_channel.txt >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log 
+
+      # todo parse output
+      if [ $sta_channel_rc != 0 ]; then
+         if [ $ret_grep != 0 ]; then
+            echo "Warning: ${amqerr} for Channel : $line ; continuing"
+         fi
+         #   exit $sta_channel_rc
+      fi
+      
+   done
+fi
+
+TS=`date +%Y-%m-%d_%H:%M:%S`
+echo "$TS - removing work file $CHT_start_channel.txt" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_start_chstatus.log
+if [ -f ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt ] ; then 
+   rm ${migrationDir}/${qmgr}/"$CHT"_start_channel.txt 
+fi 
+exit 0
