@@ -1,4 +1,21 @@
+#!/bin/sh
+######################################################################
+#
+#  Program      : get_latest_mqm_installpath.ksh
+#
+#  Description  : return last mqm install path
+#
+#  Syntax       : get_latest_mqm_installpath.ksh 
+#
+#
+#  Date         Action                         Author
+#  -------------------------------------------------------------------
+#  01.05.2014   first release                  Juan J. Sanz Martin
+#  27.05.2014   adapted and tested for linux   Juan J. Sanz Martin
+#
+######################################################################
 
+# set -x 
 
 case "`uname`" in
   'AIX')
@@ -44,4 +61,25 @@ case "`uname`" in
       pkg_instpath=`echo "$mq_inst" | awk -F ';'  '{print $4}'`
       
       if [[ ! -z $pkg_version ]] && [[ "$pkg_instpath" != "(none)" ]]  ; then
-         if
+         if [ $pkg_version -gt $MQVERSION_tmp ] ; then
+            MQVERSION_tmp=$pkg_version
+            INSTALLDIR="${pkg_instpath}/"
+         fi
+		fi
+     
+     done
+     ;;
+   *)
+	  echo "wrong  OS System !!!"
+	  # exit ?
+	  ;;
+esac
+
+
+
+if [ -d $INSTALLDIR ] && [ ! -z $INSTALLDIR ] ; then
+	echo $INSTALLDIR
+	exit 0
+else
+	exit 1
+fi
