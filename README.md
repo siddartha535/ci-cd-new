@@ -1,29 +1,33 @@
-#!/bin/ksh
+#!/usr/bin/ksh
 ##############################################################################
+#$Id: mqstop.sh,v 1.4.2.2 2011/09/26 10:46:50 EMEA\lreckru Exp $
 #
-# Script:         mqstopchannels.sh
+# Script:          mqstop.sh
 #
-# Usage:          mqstopchannels.sh <qmgr> <chltype> | <ALL filename>
+# Usage:          
 #
-# Description:    select and stop channels
+# Description:     check processes and stop qmgr
+#                  
+#                  
+#
+#                  
+#                  
+#
 #                     
 #
 # Remarks:         
 #                  
 #                  
 #                  
-#                  
+#                
 #
-# History:         2013-03-02   lreckru     add channel list in file as parameter
-#                                           each line must be like "CHANNEL(name)"
-#                                           ever exclude SYSTEM.* Objects
-#                  2014-11-27   sanzmaj     multiversion
-#                               phutzel     checks
-#
+# History:         2012-08-04   fdressle     initial version
+#                  2014-11-27   sanzmaj      multiversion
+#                               phutzel      invoke, checks
+#                  2015-02-17   jduelli      function stop_agents
+#                  2015-05-20	lreckru      change replace variable su_cmd_mqm_keep_env, su_cmd_mqm_pre with fkt do_as_mqm
 ##############################################################################
-#
 #set -x
-#
 
 # get full path to this script
 HOME=`readlink -f $0`
@@ -32,142 +36,167 @@ HOME=`dirname $HOME`
 # call the common include
 . ${HOME}/mqinclude.sh
 
-if [ $# -lt 2 ] ; then
-  echo "Usage : $0 <qmgr> <chltype>"
-  echo "No Queue Manager name or channel type supplied"
-  echo "You must supply a Queue Manager name and a channel type" 
-  echo "ALL | SDR | SVR | RCVR | RQSTR | CLNTCONN | SVRCONN | CLUSSDR | CLUSRCVR  "
-  echo "for the channel type ALL you must also supply a filename  (with a list of channel names)"
-  echo "each line like 'CHANNEL(XXXXXXX.XXXXXXX.XX)' "
-  echo "Use the command dspmq to see the list of installed Queue Managers"
-  echo "Exiting ..."
-  exit 1
-fi
+# Time to wait between checks
+SLEEPTIME1=1
+# Time to wait between immediate and brutal end
+SLEEPTIME2=1
 
-qmgr=$1
-CHT=$2
-# Checks and set multi-version vars
-mqsetenv -m $qmgr
+function stop_mqs
+{
+    qmgr=$1
+    count=0
+    i=0
+    
+    # check if any process are running
+    srchstr="( |-m)${qmgr} *.*$"
+    for process in amqzmuc0 amqzxma0 amqfcxba amqfqpub amqpcsea amqzlaa0 \
+                           amqzlsa0 runmqtrm runmqchi runmqlsr amqcrsta amqrrmfa amqrmppa \
+                           amqzfuma amqzdmaa amqzmuf0 amqzmur0 amqzmgr0 MQXR   
+        do
+            count=`ps -efww | tr "\t" " " | grep $process | grep -v grep | \
+            egrep "$srchstr" | awk '{print $2}'| wc -l`
+            if [[ $count != 0 ]];then
+                i=`expr $i + 1`                    
+             fi
+        done
+        
+    if [[ $i -eq 0 ]];then 
+	p_info_ts "No running queue manager processes found."
+#        echo "$MQSCRIPT : Info ! No running queue manager processes found."
+    else 
+        for severity in immediate brutal
+        do
+              # End the queue manager in the background to avoid
+              # it blocking indefinitely. Run the TIMEOUT timer 
+              # at the same time to interrupt the attempt, and try a
+              # more forceful version. If the brutal version fails, 
+              # nothing more can be done here.
+              
+              defpsistno=$(echo "display ql(*) where(DEFPSIST EQ NO)" | do_as_mqm ${qmgr} "runmqsc ${qmgr}" | grep QUEUE | grep -v SYSTEM | wc -l)
+              if [[ ${defpsistno} -ne 0 ]]; then
+                  queuenames=$(echo "display ql(*) where(DEFPSIST EQ NO)" | do_as_mqm ${qmgr} "runmqsc ${qmgr}" | grep QUEUE | grep -v SYSTEM | awk -F " " '{print $1}')
+                  for queue in ${queuenames}
+                  do
+                      npmclass=$(echo "display ${queue} NPMCLASS" | do_as_mqm ${qmgr} "runmqsc ${qmgr}" | grep "NPMCLASS(" | sed 's/(/)/' | awk -F ")" '{print $2}')
+                      if [[ ${npmclass} = "HIGH" ]]; then
+                          SLEEPTIME2=1200
+                          break
+                      fi
+                  done
+              fi
+              
+              
+     	      p_info_ts "Attempting ${severity} end of queue manager '${qmgr}'"
+              case $severity in
+            
+              immediate)
+                # Minimum severity of endmqm is immediate which severs connections.
+                   if [[ -x ${MQ_HOME}/bin/endmqm ]] ;then
+                       # Stop Queue-manager
+                       ( do_as_mqm ${qmgr} "${MQ_HOME}/bin/endmqm -i ${qmgr} " 2>/dev/null | grep MQSeries )&
+                    else
+		              p_warning_ts "endmqm not executable, not all qmgr processes are stopped !"
+                      rc=4
+                    fi
+                ;;
+            
+              brutal)
+                # This is a forced means of stopping queue manager processes.
+            
+                srchstr="( |-m)${qmgr} *.*$"
+                for process in amqzmuc0 amqzxma0 amqfcxba amqfqpub amqpcsea amqzlaa0 \
+                           amqzlsa0 runmqtrm runmqchi runmqlsr amqcrsta amqrrmfa amqrmppa \
+                           amqzfuma amqzdmaa amqzmuf0 amqzmur0 amqzmgr0 MQXR   
+                do
+                  ps -efww | tr "\t" " " | grep $process | grep -v grep | \
+                     egrep "$srchstr" | awk '{print $2}'| \
+                        xargs kill -9 > /dev/null 2>&1
+                done
+            
+              esac
+            
+              TIMED_OUT=yes
+              SECONDS=0
+              while (( $SECONDS < ${TIMEO:-55} ))
+              do
+               TIMED_OUT=yes
+               i=0
+               while [[ $i -lt 5 ]]
+               do
+                 # Check for execution controller termination
+                 srchstr="( |-m)${qmgr} *.*$"
+                 cnt=`ps -efww | tr "\t" " " | grep amqzxma0 | grep -v grep | \
+                   egrep "$srchstr" | awk '{print $2}' | wc -l `
+                 i=`expr $i + 1`
+                 sleep $SLEEPTIME1
+                 if [[ $cnt -eq 0 ]];then
+                   TIMED_OUT=no
+                   break
+                 fi
+               done
+            
+               if [[ ${TIMED_OUT} = "no" ]];then
+                 break
+               fi
+            
+#               echo "$MQSCRIPT : Info ! Waiting for ${severity} end of queue manager '${qmgr}'"
+	       p_info_ts "Waiting for ${severity} end of queue manager '${qmgr}'"
+               sleep $SLEEPTIME2
+              done # timeout loop
+                        
+        done # next phase       
+    fi
+}
 
-# Check channel list
-if [ "${CHT}" = "ALL" ];then
-   Obj_Listfile=$3
-   extstr="from file $Obj_Listfile"
-   if [ ! -f ${Obj_Listfile} ] ; then
-      echo "Can't find channel list file ${Obj_Listfile} "
-      exit 2
-   fi
-fi
+function stop_agents
+{
+	qmgr=$1
+	count=0
+	cnt=0
 
-platform=`uname`
+	for process in mqagentadmin mqagentmonitor
+	do
+		count=`ps -efww | tr "\t" " " | grep $process | grep $qmgr | grep -v grep | awk '{print $2}'| wc -l`
+		cnt=`expr $cnt + $count`
+	done
 
-echo "Working with Queue Manager : ${qmgr} and channel type : $CHT $extstr" 
-echo "Excluding channels with 'SYSTEM.*' in the name "
-
-if [ "${migrationDir}" = "" ]; then
-	if [ $platform = 'CYGWIN_NT-5.1' ]; then
-      migrationDir=`dirname $0`/../migration
+	if  [[ $cnt > 0 ]]; then
+		p_info_ts "Stopping ${cnt} running agents of queuemanager ${qmgr}"
+		for process in mqagentadmin mqagentmonitor
+		do
+			ps -efww | tr "\t" " " | grep $process | grep $qmgr | grep -v grep | awk '{print $2}'| xargs kill -9 > /dev/null 2>&1
+		done
 	else
-      migrationDir=/var/mw/mqbackup
+		p_info_ts "Found no running agents for queuemanager ${qmgr}"
 	fi
-fi
+}
 
-echo "Use migration directory ${migrationDir}"
+function stop_broker
+{
+        qmgrName=$1
+        
+		  # call the IIB Tools script to start an Integration Node by the name of its Queue Manager
+		iibstopnode -qmgr $qmgrName
+}
 
-# ensure we have a migration directory
-if [ ! -d $migrationDir ];then
-	mkdir $migrationDir
-fi
-
-# ensure we have a directory per queue manager
-if [ ! -d ${migrationDir}/${qmgr} ];then
-	mkdir ${migrationDir}/${qmgr}
-fi
-
-
-if [ -f ${migrationDir}/${qmgr}/"$CHT"_channel.txt ]; then 
-   rm ${migrationDir}/${qmgr}/"$CHT"_channel.txt 
-fi 
-if [ -f ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log ]; then
-   echo "" > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
-else
-   touch ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
-fi
-HOST=`hostname`
-TS=`date +%Y-%m-%d_%H:%M:%S`
-echo "$TS - stopping $CHT channels $extstr for Queue Manager: ${qmgr} on host : $HOST" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
-
-echo "display chstatus(*) WHERE(STATUS EQ STOPPED)" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr} 2>/dev/null "  > /tmp/${qmgr}_"$CHT"_chs.txt 
-retcode=$?
-grep AMQ8420 /tmp/${qmgr}_"$CHT"_chs.txt
-ret_grep=$? 
-# todo parse output and what about other channel types
-if [ $retcode != 0 ]; then
-   if [ $ret_grep != 0 ]; then 
-      echo "Not AMQ8420 : retcode is : $retcode ; exiting"
-      exit $retcode 
-   fi 
-fi	
-# list channels to stop
-if [ "${CHT}" = "ALL" ];then 
-   grep CHLTYPE\(.*\) /tmp/${qmgr}_"$CHT"_chs.txt > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
-else
-   grep CHLTYPE\($CHT\) /tmp/${qmgr}_"$CHT"_chs.txt > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
-   cmdstr=`echo "DISPLAY channel(*) WHERE ( chltype EQ $CHT )"`
-   echo "${cmdstr}" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" > /tmp/"${qmgr}"_"$CHT"_dis_channel.txt
-   ret_code=$?
-   if [ $ret_code != 0 ]; then
-      echo " dis channel ret_code is : $ret_code ; exiting "
-      exit $ret_code
-   fi	 
-   grep CHANNEL /tmp/"${qmgr}"_"$CHT"_dis_channel.txt | grep -v SYSTEM. | awk ' { print $1 } ' > ${migrationDir}/${qmgr}/"$CHT"_channel.txt
-   Obj_Listfile=${migrationDir}/${qmgr}/"$CHT"_channel.txt
-fi
-# stop channels 
-if [ ! -f "${Obj_Listfile}" ] ; then
-   echo "Object list file not readable"
-else
-   cat ${Obj_Listfile} | while read line
-   do
-
-      CHLN=`echo $line | cut -d'(' -f2|cut -d')' -f1 `
-      if [ "$CHLN" != "${qmgr}.CL.ADM" ] ;
-      then 
-      echo "stopping : $line" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
-      echo "stop $line mode(force)" | ${su_cmd_pre} "${MQ_HOME}/bin/runmqsc ${qmgr}" >   /tmp/"${qmgr}"_"$CHT"_stop_channel.txt
-       
-      ret_code_sto=$?
-      amqerr=`grep AMQ /tmp/"${qmgr}"_"$CHT"_stop_channel.txt`  
-      grep -E "AMQ9533|AMQ9531" /tmp/"${qmgr}"_"$CHT"_stop_channel.txt > /dev/null
-      ret_grep=$?
-
-      # todo check output AMQ9533 is ok 
-      cat /tmp/"${qmgr}"_"$CHT"_stop_channel.txt >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
-      if [ $ret_code_sto != 0 ]; then 
-         if [ $ret_grep != 0 ]; then 
-            echo "Warning: ${amqerr} for Channel : $line ; continuing"
-            # exit $ret_code_sto 
-         fi 
-      fi	
-      else
-         echo "skipped Admin SVRCONN channel : $line " >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
+function invoke {
+   qmgr=$1
+   rc=0
+   
+    if [[ "YES" = "${STRTBRK}" ]]
+      then
+         p_info_ts "Stopping broker ${qmgr}"
+         stop_broker ${qmgr}    
       fi
-       
-   done
-fi
+  
+   p_info_ts "Stopping queuemanager ${qmgr}"
+   stop_mqs ${qmgr} 
 
-#grep AMQ9533 ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log > ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
-TS=`date +%Y-%m-%d_%H:%M:%S`
-
-echo "Waiting for channels to be stopped"
-sleep 10
-
-echo "--- SUMMARY ---"
-echo "Already stopped channels:"
-wc -l ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus_warning.log
-
-echo "$TS - removing work file $CHT_channel.txt" >> ${migrationDir}/${qmgr}/"${qmgr}"_"$CHT"_chstatus.log
-if [ -f ${migrationDir}/${qmgr}/"$CHT"_channel.txt ] ; then 
-   rm ${migrationDir}/${qmgr}/"$CHT"_channel.txt
-fi
-exit 0
+   # TODO run for all qmgrs automatically?
+   stop_agents ${qmgr}   
+      
+}
+##############################################################################
+# call the common routine for all queue managers
+MQTOOLS_CHECK=NO
+. ${HOME}/mqinvokeforqmgrs.sh
