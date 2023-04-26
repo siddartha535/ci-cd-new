@@ -1,222 +1,355 @@
-#mq scripts
-
-
-#!/usr/bin/ksh
+#!/bin/ksh
 ##############################################################################
 #
-# Script:          mqstart.sh
+# Script:          mqinclude.sh
 #
 # Usage:          
 #
-# Description:     start qmgr
-#                  
-#                  
+# Description:     add general vars and path and fkt
 #
-#                  
-#                  
-#
-#                     
-#
-# 						     checks
-##############################################################################
+ ##############################################################################
 #set -x
 
+# TODO's
+# - s bit , dann aber pruefen welche security neue prozesse und files haben
+# Wenn eine Rueckgabewert ungleich 0 muss auch ein exit ungleich 0 erfolgen
 
-# get full path to this script
-HOME=`readlink -f $0`
-HOME=`dirname $HOME`
-#new
-export SCRIPT_NAME=$(basename $0)
+. /etc/rc.status
+. /opt/mw/bin/mw_include.sh
 
-WAITTIME=5
+MQ_ROOT=/var/mqm
+MQ_LOG=${MQ_ROOT}/log
+MQ_DATA=${MQ_ROOT}/qmgrs
+MQ_OLDLOG=${MQ_ROOT}/oldlogs
+MQ_JMX_CONF=/etc/mw/jmxconf
 
-# call the common include
-. ${HOME}/mqinclude.sh
+# standard for non multi version. 
+MQ_HOME_DEFAULT=/opt/mqm
 
-function start_mqs
-{
-        QMGR=$1
-        rc=0
-        [[ "$PLATFORM" = "AIX" ]] && export EXTSHM=ON
-        
-        count=0
-        i=0
-        # check if any mq processes are running
-        srchstr="( |-m)$QMGR *.*$"
-        for process in amqzmuc0 amqzxma0 amqpcsea amqzlaa0 amqzfuma amqzmur0 runmqlsr amqzmgr0
-        do
-            count=`ps -efww | tr "\t" " " | grep $process | grep -v grep | \
-            egrep "$srchstr" | awk '{print $2}'| wc -l`
-            if [[ $count -gt 0 ]]
-            then
-                processes="$processes\n   $process"
-                i=1                    
-            fi
-        done
-            
-        if [[ $i -eq 0 ]]; then
-#clear ipc resources 
-#          if [[ -x ${MQ_HOME}/bin/amqiclen ]]; then
-#            p_info "Clear all IPC resources"
-#            do_as_mqm ${QMGR} "${MQ_HOME}/bin/amqiclen -x -m $QMGR 2>&1"
-#          fi
+MQTOOLS_HOME=/opt/mw/mqm
+MQTOOLS_DATA=/var/mw/mqm
+MQTOOLS_LOG=/var/mw/logs
+MQTOOLS_ETC=/etc/mw/mqm
+MQSCRIPT=`basename $0`
+BACKUP_MQM=/var/mw/mqbackup
+MAINTENANCE=SERVER-Maintenance
 
-          if [[ -x "${MQ_HOME}/bin/strmqm" ]]; then
-#                        exports="export AMQ_BAD_COMMS_DATA_FDCS=TRUE; export AMQ_ADDITIONAL_JSON_LOG=1;"
-			echo "Message SEverity:" ${MSGSEVERITY}
-                        exports="export AMQ_BAD_COMMS_DATA_FDCS=TRUE;"
-			mqversion=$(dspmq -o inst | grep ${QMGR} | awk -F " " '{print $4}' | sed 's/)/(/g' | awk -F "(" '{print $2}' | awk -F "." '{print $1$2$3}')
-			if [[ ${mqversion} -ge "910" ]]
-            		then
-                                if [[ "YES" = "${MSGSEVERITY}" ]];then
-                                        exports="$exports export AMQ_DIAGNOSTIC_MSG_SEVERITY=1;"
-                    else
-                                        exports="$exports export AMQ_DIAGNOSTIC_MSG_SEVERITY=0;"
-                                fi
-                                if [[ "YES" = "${JSON}" ]]; then
-                                        exports="$exports export AMQ_ADDITIONAL_JSON_LOG=1;"
-                                fi
-            fi
-			
+myHostname=`hostname`
+
 #Expiring global units of work
-                        AMQ_TRANSACTION_EXPIRY_RESCAN=${AMQ_TRANSACTION_EXPIRY_RESCAN:-$DEF_AMQ_TRANSACTION_EXPIRY_RESCAN}
-                        AMQ_XA_TRANSACTION_EXPIRY=${AMQ_XA_TRANSACTION_EXPIRY:-$DEF_AMQ_XA_TRANSACTION_EXPIRY}
+DEF_AMQ_TRANSACTION_EXPIRY_RESCAN=15
+DEF_AMQ_XA_TRANSACTION_EXPIRY=240
 
- # 0 means off , convert minutes in milliseconds
-                        if [[ ${AMQ_TRANSACTION_EXPIRY_RESCAN} -gt 0 ]] ; then
+# set def for RTO
+DEF_RTO_DEV=0
+DEF_RTO_INT=0
+DEF_RTO_PROD=60
 
-                                AMQ_TRANSACTION_EXPIRY_RESCAN=$(expr ${AMQ_TRANSACTION_EXPIRY_RESCAN} \* 60000)
-                                p_info "Setting AMQ_TRANSACTION_EXPIRY_RESCAN=${AMQ_TRANSACTION_EXPIRY_RESCAN}"
-                                exports="$exports export AMQ_TRANSACTION_EXPIRY_RESCAN=${AMQ_TRANSACTION_EXPIRY_RESCAN};"
-                        else
-                                p_info "Disable AMQ_TRANSACTION_EXPIRY_RESCAN"
-                        fi
-                        if [[ ${AMQ_XA_TRANSACTION_EXPIRY} -gt 0 ]] ; then
-                                AMQ_XA_TRANSACTION_EXPIRY=$(expr ${AMQ_XA_TRANSACTION_EXPIRY} \* 60000)
-                                p_info "Setting AMQ_XA_TRANSACTION_EXPIRY=${AMQ_XA_TRANSACTION_EXPIRY}"
-                                exports="$exports export AMQ_XA_TRANSACTION_EXPIRY=${AMQ_XA_TRANSACTION_EXPIRY};"
-                        else
-                                p_info "Disable AMQ_XA_TRANSACTION_EXPIRY"
-                        fi
 
-            # Start MQSeries Queue-Manager
-            p_info "Start queuemanager ${QMGR}"
-            echo $exports
-        	do_as_mqm ${QMGR} "$exports ${MQ_HOME}/bin/strmqm $QMGR 2>&1|sed 's/^/          /'" # su mqm -c (without - ; to preserver environment )
-			erg=$?
-			case ${erg} in
-				0)   msg="Queue manager started (MQCC_OK)";;
-				1)   msg="Warning partial completion (MQCC_WARNING)";;
-				2)   msg="Call failed (MQCC_FAILED)";;
-				3)   msg="Queue manager being created";;
-				5)   msg="Queue manager running";;
-				16)  msg="Queue manager does not exist";;
-				23)  msg="Log not available";;
-				24)  msg="A process that was using the previous instance of the queue manager has not yet disconnected.";;
-				30)  msg="A standby instance of the queue manager started. The active instance is running elsewhere";;
-				31)  msg="The queue manager already has an active instance. The queue manager permits standby instances.";;
-				39)  msg="Invalid parameter specified";;
-				43)  msg="The queue manager already has an active instance. The queue manager does not permit standby instances.";;
-				47)  msg="The queue manager already has the maximum number of standby instances";;
-				49)  msg="Queue manager stopping";;
-				58)  msg="Inconsistent use of installations detected";;
-				62)  msg="The queue manager is associated with a different installation";;
-				69)  msg="Storage not available";;
-				71)  msg="Unexpected error";;
-				72)  msg="Queue manager name error";;
-				74)  msg="The WebSphere MQ service is not started.";;
-				91)  msg="The command level is outside the range of acceptable values.";;
-				92)  msg="The queue manager's command level is greater or equal to the specified value.";;
-				100) msg="Log location invalid";;
-				119) msg="User not authorized to start the queue manager";;
-				*)   msg="unknown return code";;
-			esac
-			case ${erg} in
-				0|3|5)  msg=""
-				        p_info_ts "wait ${WAITTIME} sec to check ${QMGR}"
-				        sleep ${WAITTIME}
-				        if [[ $(dspmq -m $QMGR | grep "STATUS(Running)"| wc -l) -eq 1 ]]; then 
-               				p_info_ts "Status Qmgr $QMGR : STATUS(Running)"
-               			else
-#               			    call_logger CRONMON 2 "second time mqstart $QMGR"
-#new
-                                call_logger CRONMON 2 ${SCRIPT_NAME} "second time mqstart $QMGR"
-               			    p_info_ts "2. Start queuemanager ${QMGR}"
-            				do_as_mqm ${QMGR} "$exports ${MQ_HOME}/bin/strmqm $QMGR 2>&1|sed 's/^/          /'" # su mqm -c (without - ; to preserver environment )
-							erg=$?
-               			    rc=$erg
-               			fi
-              			;;
-				*)  	 call_logger CRONMON 3 ${SCRIPT_NAME} "mqstart $QMGR $msg"
-#				call_logger CRONMON 3 "mqstart $QMGR : $msg"
-				    	rc=$erg
-				    	p_error_ts "Return code strmqm : $erg : $msg";;
-			esac
-          fi
-        else
-		   p_warning_ts "Exisiting WMQ-process(es) for $QMGR found: $processes"
-#          echo "$MQSCRIPT : Warning ! Exisiting WMQ-process(es) for $QMGR found: $processes"
-          rc=2
+GREP=grep
+EGREP=egrep
+WHOAMI=whoami
+PS=ps
+PSPARM="-ef"
+
+MQUSER=mqm
+
+PLATFORM="`uname`"
+
+case ${PLATFORM} in
+ 'AIX')
+   MQMHOME=/usr/local/mw/mqm
+   MQ_HOME_DEFAULT=/usr/mqm
+   export JAVA_HOME=/usr/mqm/ssl/jre
+   ;;
+ 'HP-UX')
+   MQMHOME=/usr/local/mw/mqm
+   PSPARM="-efx"
+   export JAVA_HOME=/opt/mqm/ssl/jre
+   ;;
+ 'SunOS')
+   MQMHOME=/usr/local/mw/mqm
+   WHOAMI="/usr/ucb/whoami"
+   PS=/usr/ucb/ps
+   PSPARM="-auxww"
+   export JAVA_HOME=/opt/mqm/ssl
+   ;;
+ 'Linux')
+   MQMHOME=/opt/mw/mqm/
+# normal ps ef has only 80 char output, to less for the commands
+   PSPARM="-efww"
+   LINUXVERSION=$(grep VERSION /etc/S*SE-brand |awk '{print $3}')
+   if [[ ${LINUXVERSION} -eq 12 ]]; then   
+         lvcreateoptions="-y"
+   fi
+   ;;
+ *)
+   echo "Unsupported platform $PLATFORM"
+   exit 1
+   ;;
+esac
+
+#may be overridden for multi version installations
+MQ_HOME=$MQ_HOME_DEFAULT
+
+if [[ -z $MQ_HOME_LATEST ]] ; then
+	# TODO check to implement inline and delete script  
+    export MQ_HOME_LATEST=`${MQMHOME}/tools/get_latest_mqm_installpath.ksh`
+fi 
+#TODO remove all usages of old var name
+export LATEST_MQM_DIR=$MQ_HOME_LATEST
+
+# su only if root start the script
+if [[ `id -u -n` != ${MQUSER} ]];then
+        su_cmd_pre="su - ${MQUSER} -c "
+        chown mqm:mqm  /var/mw/logs/*.log        
+        su_cmd_mqm_keep_env="su ${MQUSER} -c "
+else
+        su_cmd_pre="ksh "
+        su_cmd_mqm_keep_env="ksh "
+fi
+
+if [[ -d /etc/data/dev ]]
+then
+   DEVICE_DIR=/etc/data/dev
+else
+   DEVICE_DIR=/dev
+fi
+
+# Initialisierungen
+if [[ ! -z "$TERM" ]];then
+	cls=`tput clear`            # Bildschirm loeschen
+	rev=`tput rev`
+	ul=`tput smul`
+	bold=`tput bold`            # Fettdruck einschalten
+	off=`tput sgr0`
+fi
+
+# Text Konstanten
+prompt() {
+  echo "Eingabe ==> \c" >/dev/tty
+}
+
+p_logo() {
+  sp="               "
+  echo "$bold "    " $1$sp$off"
+}
+
+p_title() {
+  sp="________________"
+  echo "$sp$1$sp$off"
+}
+
+p_fehler() {
+  sp="  "
+  echo "$bold$sp$1$sp$off"
+}
+p_error() {
+  echo "ERROR   : $1"
+}
+p_error_ts() {
+  echo "ERROR   : $(date +%Y-%m-%d#%H:%M:%S) - $1"
+}
+p_info() {
+  echo "INFO    : $1"
+}
+
+p_info_ts() {
+  echo "INFO    : $(date +%Y-%m-%d#%H:%M:%S) - $1"
+}
+
+p_warning() {
+  echo "WARNING : $1"
+}
+p_warning_ts() {
+  echo "WARNING : $(date +%Y-%m-%d#%H:%M:%S) - $1"
+}
+
+p_line() {
+  echo "_______________________________________\c"
+  echo "_______________________________________$off"
+}
+
+hit() {
+  if [[ "$cmd_flg" = "TRUE" ]]
+  then
+  	exit $rc
+  fi 
+ echo "$rev Press <RETURN> to continue!${off}\c"
+#  read x
+   read -t 600 x || exit 1
+}
+
+function die {
+   rc=$?
+   if [[ $rc -ne 0 ]]; then
+      echo "$1. rc=$rc"
+      exit $rc
+   fi
+}
+
+function input {
+#set -x
+  text=$1
+  var=$2
+  default=$3
+  set -A _opts $4
+  optionLabel=""
+  for option in ${_opts[@]}
+  do
+     [[ -z $optionLabel ]] && optionLabel="$option" || optionLabel="$optionLabel|$option"
+  done
+    
+  while [ TRUE ]
+  do
+     label=$text
+     [[ -z $optionLabel ]] || label="$label ($optionLabel)"   
+     [[ -z $default ]] || label="$label [$default]"
+     echo "$label : \c";
+     read $var
+     eval value=\$$var
+     if [[ -z "$value" ]]; then
+        if [[ ! -z $default ]];then
+            eval "$var=\$default"
+            echo "=> Use default '$default'"
+            break
         fi
-}
-
-function start_broker
-{
-  qmgrName=$1
+        continue
+     fi
+     
+     if [[ ! -z $optionLabel ]];then
+        # check
+        _valid=FALSE
+        for option in ${_opts[@]}
+        do
+           [[ "$option" = "$value" ]] && _valid=TRUE
+        done
         
-  # call the IIB Tools script to start an Integration Node by the name of its Queue Manager
-  iibstartnode -qmgr $qmgrName
+        if [[ "FALSE" = "$_valid" ]];then
+           echo "=> Not a valid option"
+           continue
+        fi
+     fi
+     
+     echo "=> Confirm value '$value' [yes]: \c"
+     read confirm
+     if [[ "yes" = "${confirm:-yes}" ]];then
+        break;
+     fi
+  done
 }
 
-function invoke {
-   QMGR=$1
-   MODE=$2
-   rc=0
-   
-   if [[ "SINGLE" = "${MODE}" || "YES" = "${STRTWMQ}" ]];then
-      p_info_ts "Starting queuemanager ${QMGR}"
-      start_mqs ${QMGR}      
-      
-      if [[ "YES" = "${STRTBRK}" ]]
+# Set the env based on mode (-m := qmgr or -p := path )
+function mqsetenv {
+   _mode=$1 
+   _pathorqmgr=$2 
+    
+   if [[ -x ${MQ_HOME_LATEST}/bin/setmqenv ]]
+   then
+      . ${MQ_HOME_LATEST}/bin/setmqenv $_mode ${_pathorqmgr} -l
+      MQ_HOME=`dspmqver -bf 128`
+      rc=$?
+      if [[ $rc -ne 0 ]]
       then
-         p_info_ts "Starting broker ${QMGR}"
-         start_broker ${QMGR}    
-      fi    
-
-      p_info_ts "Summary RC for ${QMGR} $rc"
-      
-   else
-      p_info_ts "Skip start of queuemanager ${QMGR} by config"
-#      echo "Skip start of queuemanager ${QMGR} by config"
-   fi 
+         MQ_HOME=$MQ_HOME_DEFAULT
+         # Get MQ Version in format VMR from level , e.g. version 7.0.1
+         mqversion=`dspmqver -bf 4| cut -d- -f1|cut -dp -f2`
+      else
+         mqversion=`dspmqver -bf 1024`
+      fi
+   fi
 }
 
-
-# called befor do all other 
-function invokestartup {
-	# get time sync status
-	p_info "\n$(echo "q"|ntpq -p)"
-	
-	i=0
-	# check if any mq processes are running
-	for process in amqzmuc0 amqzxma0 amqpcsea amqzlaa0 amqzfuma amqzmur0 runmqlsr amqzmgr0
-	do
-	    count=`ps -efww | tr "\t" " " | grep $process | grep -v grep | awk '{print $2}'| wc -l`
-	    if [[ $count -gt 0 ]]
-	    then
-	        i=1                    
-	    fi
-	done
-	    
-	if [[ $i -eq 0 ]]; then
-	# clear all ipc resources
-	  if [[ -x ${MQ_HOME}/bin/amqiclen ]]; then
-	    p_info_ts "Clear all MQ-IPC resources"
-	    ${su_cmd_pre}"${MQ_HOME}/bin/amqiclen -x 2>&1"
-	  fi
+#  check for variable if version >= 710
+function chk_variable_LD_LIBRARY_PATH {
+if [ ! -z $mqversion ]; then
+	if [ $mqversion -ge 710 ]; then
+			pid=`ps -efww | grep -w ${qmgr} | grep amqzxma0 |grep -v grep| awk '{print $2}'`
+			if [[ ! -z $pid ]]; then
+				AMQ_LD_LIBRARY_PATH=`cat /proc/$pid/environ|tr '\0' '\n'|grep LD_LIBRARY_PATH|cut -d= -f2`
+				if [[ -z $AMQ_LD_LIBRARY_PATH ]];then 
+					p_error "No variable LD_LIBRARY_PATH found."
+				else
+				  p_info "found LD_LIBRARY_PATH=${AMQ_LD_LIBRARY_PATH}"
+				fi
+			else
+				p_error "No running process 'amqzxma0' for qmgr: '$qmgr' found."
+			fi
 	fi
+fi
 }
 
-###############################################################################
-# call the common routine for all queue managers
-. ${HOME}/mqinvokeforqmgrs.sh
+#  check for variable 
+function chk_variable_TRANSACTION_EXPIRY_ {
+
+pid=`ps -efww | grep -w ${qmgr} | grep amqzxma0 |grep -v grep| awk '{print $2}'`
+if [[ ! -z $pid ]]; then
+	AMQ_TRANSACTION_EXPIRY_RESCAN=`cat /proc/$pid/environ|tr '\0' '\n'|grep AMQ_TRANSACTION_EXPIRY_RESCAN|cut -d= -f2`
+	AMQ_XA_TRANSACTION_EXPIRY=`cat /proc/$pid/environ|tr '\0' '\n'|grep AMQ_XA_TRANSACTION_EXPIRY|cut -d= -f2`
+	if [[ -z $AMQ_TRANSACTION_EXPIRY_RESCAN || -z AMQ_XA_TRANSACTION_EXPIRY ]];then 
+		p_error "No TRANSACTION_EXPIRY variables found."
+	else
+	    p_info "Rescan Interval [minute(s)]: $(expr ${AMQ_TRANSACTION_EXPIRY_RESCAN} / 60000)"
+		p_info "      XA Expiry [minute(s)]: $(expr ${AMQ_XA_TRANSACTION_EXPIRY} / 60000)"
+	fi
+else
+	p_error "No running process 'amqzxma0' for qmgr: '$qmgr' found."
+fi
+}
+
+# call a command as mqm if id=root  arg1=qmgr arg2=command
+function do_as_mqm {
+_qmgr=$1
+_arg1="$2"
+# su only if root start the script
+if [[ `id -u -n` != ${MQUSER} ]];then
+#       echo su - ${MQUSER} -c ". ${MQTOOLS_HOME}/bin/mqsetenv.sh $_qmgr;$_arg1"
+        su - ${MQUSER} -c ". ${MQTOOLS_HOME}/bin/mqsetenv.sh $_qmgr;$_arg1"
+else
+        ksh "$_arg1"
+fi
+return $?
+}
+
+function stop_mqagents {
+#Check the running Queue Managers:
+#qmgrs=$(dspmq | grep -i running | sed 's/)/(/g' | awk -F "(" '{print $2}')
+qmgrs=$(${MQ_HOME_LATEST}/bin/dspmq | grep -i running | sed 's/)/(/g' | awk -F "(" '{print $2}')
+agentproccount=
+#Stop the mqagents for the running Queue Managers
+for qmgr in ${qmgrs}
+do
+    #echo "failed"
+    #. /opt/mw/mqm/bin/mqsetenv.sh ${qmgr}
+    #echo "failed1"
+    INST_PATH=$(${MQ_HOME_LATEST}/bin/dspmq -o inst |grep -i $qmgr | sed 's/)/(/g'  | awk -F "(" '{print $6}')
+    echo "stop service(AGENT.MQMONITOR)" | su mqm -c "${INST_PATH}/bin/runmqsc ${qmgr}"
+    echo "stop service(AGENT.MQADMIN)" | su mqm -c "${INST_PATH}/bin/runmqsc ${qmgr}"
+done
+
+#Check if there are still any mqagent processes running
+agentproccount=$(ps -ef|grep "/mqagent"|grep -v grep|awk '{print $2}' | wc -l)
+#If there are still processes, kill the processes
+if [[ ${agentproccount} -ne 0 ]]; then
+    #killing mqagent process
+    ps -ef|grep "/mqagent"|grep -v grep|awk '{print $2}'| xargs kill -9
+else
+    echo "No active mqagents process"
+fi
+}
+
+function start_mqagents {
+#Check the running Queue Managers:
+#qmgrs=$(dspmq | grep -i running | sed 's/)/(/g' | awk -F "(" '{print $2}')
+qmgrs=$(${MQ_HOME_LATEST}/bin/dspmq | grep -i running | sed 's/)/(/g' | awk -F "(" '{print $2}')
+#Start the mqagents for the running Queue Managers
+for qmgr in ${qmgrs}
+do
+    #echo "failed"
+    #. /opt/mw/mqm/bin/mqsetenv.sh ${qmgr}
+    INST_PATH=$(${MQ_HOME_LATEST}/bin/dspmq -o inst |grep -i $qmgr | sed 's/)/(/g'  | awk -F "(" '{print $6}')
+    #echo "failed1"
+    echo "start service(AGENT.MQMONITOR)" | su mqm -c "${INST_PATH}/bin/runmqsc ${qmgr}"
+    echo "start service(AGENT.MQADMIN)" | su mqm -c "${INST_PATH}/bin/runmqsc ${qmgr}"
+done
+}
